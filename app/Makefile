@@ -30,7 +30,7 @@ APPNAME = "Avalanche"
 
 # Application version
 include $(CURDIR)/Makefile.version
-APPVERSION = "$(APPVERSION_M).$(APPVERSION_N).$(APPVERSION_P)"
+APPVERSION = "$(APPVERSION_M).$(APPVERSION_N).$(APPVERSION_P)-test"
 
 # Application source files
 APP_SOURCE_PATH += src
