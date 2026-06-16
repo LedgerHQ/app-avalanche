@@ -1,3 +1,7 @@
+# Opt in to the unstable `panic = "immediate-abort"` profile setting (the
+# successor to the old `panic_immediate_abort` build-std feature, see .cargo/config.toml).
+cargo-features = ["panic-immediate-abort"]
+
 [package]
 name = "avalanche-app"
 version = "0.1.0"
@@ -77,7 +81,7 @@ zuit = { path = "../../deps/ledger-rust/zuit" }
 
 
 [profile.dev]
-panic = "abort"
+panic = "immediate-abort"
 
 [profile.release]
 lto = false
@@ -85,4 +89,4 @@ codegen-units = 1
 debug = false
 opt-level = "z"
 overflow-checks = true
-panic = "abort"
+panic = "immediate-abort"
