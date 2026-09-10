@@ -19,6 +19,7 @@ use nom::bytes::complete::{tag, take};
 use nom::number::complete::be_u32;
 use zemu_sys::ViewError;
 
+use crate::checked_add;
 use crate::parser::chain_id::ChainId;
 use crate::{
     constants::CHAIN_ID_LEN,
@@ -47,6 +48,10 @@ pub struct ConvertSubnetToL1Tx<'b> {
 pub const BASE_FIELDS_LEN: u8 = 4;
 
 impl<'b> ConvertSubnetToL1Tx<'b> {
+
+    pub fn disable_output_if(&mut self, address: &[u8]) {
+        self.base_tx.disable_output_if(address);
+    }
     /// Sums the balances of all L1 validators in the list.
     fn sum_validators_balances(&self) -> Result<u64, ParserError> {
         let mut total_balance = 0u64;
@@ -138,9 +143,15 @@ impl<'b> FromBytes<'b> for ConvertSubnetToL1Tx<'b> {
 
 impl DisplayableItem for ConvertSubnetToL1Tx<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        // tx description, chain_id, address, fee, validators
-        let num_validators = BASE_FIELDS_LEN + self.num_validators() as u8;
-        Ok(num_validators)
+        // tx description, chain_id, address, fee, validators, base outputs.
+        // The base outputs were previously left out of the count entirely, so
+        // where the transaction's funds went was never on screen.
+        checked_add!(
+            ViewError::Unknown,
+            BASE_FIELDS_LEN,
+            self.num_validators() as u8,
+            self.base_tx.base_outputs_num_items()?
+        )
     }
 
     fn render_item(
@@ -185,7 +196,7 @@ impl DisplayableItem for ConvertSubnetToL1Tx<'_> {
 
                 handle_ui_message(fee_buff, message, page)
             }
-            x @ 4.. => {
+            x @ 4.. if (x as usize) < 4 + self.num_validators() => {
                 let validator_n = x - 4;
                 // An item index past the last validator is a caller error, not
                 // a reason to abort the app: the arm is open-ended, so nothing
@@ -198,6 +209,12 @@ impl DisplayableItem for ConvertSubnetToL1Tx<'_> {
                     .ok_or(ViewError::NoData)?;
                 // Print the chain ID for the validator
                 validator.node_id.render_item(0, title, message, page)
+            }
+            x @ 4.. => {
+                let output_n = x - 4 - self.num_validators() as u8;
+                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+                self.base_tx
+                    .render_base_output_with_hrp(hrp, output_n, title, message, page)
             }
         }
     }

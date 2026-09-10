@@ -21,7 +21,7 @@ use crate::{
     handlers::handle_ui_message,
     parser::{
         nano_avax_to_fp_str, BaseTxFields, DisplayableItem, FromBytes, Header, ParserError,
-        PvmOutput, SubnetAuth, SubnetId, PVM_REMOVE_SUBNET_VALIDATOR, U64_FORMATTED_SIZE
+        PvmOutput, SubnetAuth, SubnetId, PVM_REMOVE_SUBNET_VALIDATOR, U64_FORMATTED_SIZE,
     },
 };
 
@@ -74,9 +74,15 @@ impl<'b> FromBytes<'b> for RemoveSubnetValidatorTx<'b> {
 
 impl DisplayableItem for RemoveSubnetValidatorTx<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        // tx_info, node_id_items(1),
-        // subnet_id and fee
-        checked_add!(ViewError::Unknown, 3u8, self.node_id.num_items()?)
+        // tx_info, node_id_items(1), subnet_id, base outputs and fee.
+        // The base outputs were previously left out of the count entirely, so
+        // where the transaction's funds went was never on screen.
+        checked_add!(
+            ViewError::Unknown,
+            3u8,
+            self.node_id.num_items()?,
+            self.base_tx.base_outputs_num_items()?
+        )
     }
 
     fn render_item(
@@ -98,6 +104,9 @@ impl DisplayableItem for RemoveSubnetValidatorTx<'_> {
 
         let item_n = item_n - 1;
 
+        let output_items = self.base_tx.base_outputs_num_items()?;
+        let end_outputs = 2 + output_items;
+
         match item_n {
             // render validator info
             0 => self.node_id.render_item(0, title, message, page),
@@ -105,8 +114,15 @@ impl DisplayableItem for RemoveSubnetValidatorTx<'_> {
             // render subnet_id
             1 => self.subnet_id.render_item(0, title, message, page),
 
+            // render base outputs
+            x if (2..end_outputs).contains(&x) => {
+                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+                self.base_tx
+                    .render_base_output_with_hrp(hrp, x - 2, title, message, page)
+            }
+
             // render fee
-            2 => {
+            x if x == end_outputs => {
                 let label = pic_str!(b"Fee(AVAX)");
                 title[..label.len()].copy_from_slice(label);
 
@@ -123,6 +139,10 @@ impl DisplayableItem for RemoveSubnetValidatorTx<'_> {
 }
 
 impl<'b> RemoveSubnetValidatorTx<'b> {
+
+    pub fn disable_output_if(&mut self, address: &[u8]) {
+        self.base_tx.disable_output_if(address);
+    }
     fn fee(&'b self) -> Result<u64, ParserError> {
         let sum_inputs = self.base_tx.sum_inputs_amount()?;
 

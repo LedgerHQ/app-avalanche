@@ -176,7 +176,9 @@ impl TryFrom<(u32, NetworkInfo)> for Transaction__Type {
             #[cfg(feature = "banff")]
             PVM_ADD_AUTO_RENEWED_VALIDATOR => Transaction__Type::AutoRenewedValidator,
             #[cfg(feature = "banff")]
-            PVM_SET_AUTO_RENEWED_VALIDATOR_CONFIG => Transaction__Type::SetAutoRenewedValidatorConfig,
+            PVM_SET_AUTO_RENEWED_VALIDATOR_CONFIG => {
+                Transaction__Type::SetAutoRenewedValidatorConfig
+            }
             _ => return Err(ParserError::InvalidTransactionType),
         };
 
@@ -295,6 +297,18 @@ impl<'b> Transaction<'b> {
             Self::PermissionlessDelegator(tx) => tx.disable_output_if(address),
             #[cfg(feature = "banff")]
             Self::AutoRenewedValidator(tx) => tx.disable_output_if(address),
+            // These five render their base outputs, so they need the same
+            // change filtering as every other type that does. Without an arm
+            // here they fell through to `_ => {}`, and a change output would
+            // be shown in full on transactions that used to show no outputs
+            // at all.
+            Self::SubnetValidator(tx) => tx.disable_output_if(address),
+            Self::CreateSubnet(tx) => tx.disable_output_if(address),
+            Self::CreateChain(tx) => tx.disable_output_if(address),
+            #[cfg(feature = "banff")]
+            Self::RemoveSubnetValidator(tx) => tx.disable_output_if(address),
+            #[cfg(feature = "banff")]
+            Self::ConvertSubnetToL1(tx) => tx.disable_output_if(address),
             _ => {}
         }
     }
@@ -408,12 +422,10 @@ impl<'b> Transaction<'b> {
                 )
             }
             #[cfg(feature = "banff")]
-            Transaction__Type::AutoRenewedValidator => {
-                Self::init_as_auto_renewed_validator(
-                    |out| AddAutoRenewedValidatorTx::from_bytes_into(input, out),
-                    out,
-                )
-            }
+            Transaction__Type::AutoRenewedValidator => Self::init_as_auto_renewed_validator(
+                |out| AddAutoRenewedValidatorTx::from_bytes_into(input, out),
+                out,
+            ),
             #[cfg(feature = "banff")]
             Transaction__Type::SetAutoRenewedValidatorConfig => {
                 Self::init_as_set_auto_renewed_validator_config(

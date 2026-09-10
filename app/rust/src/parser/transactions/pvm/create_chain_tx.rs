@@ -20,6 +20,7 @@ use nom::{
 };
 use zemu_sys::ViewError;
 
+use crate::checked_add;
 use crate::{
     handlers::handle_ui_message,
     parser::{
@@ -48,6 +49,10 @@ pub struct CreateChainTx<'b> {
 }
 
 impl<'b> CreateChainTx<'b> {
+
+    pub fn disable_output_if(&mut self, address: &[u8]) {
+        self.base_tx.disable_output_if(address);
+    }
     fn fee(&'b self) -> Result<u64, ParserError> {
         let sum_inputs = self.base_tx.sum_inputs_amount()?;
 
@@ -130,9 +135,15 @@ impl<'b> FromBytes<'b> for CreateChainTx<'b> {
 impl DisplayableItem for CreateChainTx<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
         // we need to show:
-        // tx description, SubnetID, ChainName, VMID, GenesisDataHash
-        // and fee
-        Ok(1 + 4 + 1)
+        // tx description, SubnetID, ChainName, VMID, GenesisDataHash,
+        // the base outputs and fee.
+        // The base outputs were previously left out of the count entirely, so
+        // where the transaction's funds went was never on screen.
+        checked_add!(
+            ViewError::Unknown,
+            1u8 + 4 + 1,
+            self.base_tx.base_outputs_num_items()?
+        )
     }
 
     fn render_item(
@@ -185,7 +196,12 @@ impl DisplayableItem for CreateChainTx<'_> {
                 hex_encode(&sha[..], &mut hex_buf).map_err(|_| ViewError::Unknown)?;
                 handle_ui_message(&hex_buf, message, page)
             }
-            5 => {
+            x if (5..5 + self.base_tx.base_outputs_num_items()?).contains(&x) => {
+                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+                self.base_tx
+                    .render_base_output_with_hrp(hrp, x - 5, title, message, page)
+            }
+            x if x == 5 + self.base_tx.base_outputs_num_items()? => {
                 let label = pic_str!(b"Fee(AVAX)");
                 title[..label.len()].copy_from_slice(label);
 

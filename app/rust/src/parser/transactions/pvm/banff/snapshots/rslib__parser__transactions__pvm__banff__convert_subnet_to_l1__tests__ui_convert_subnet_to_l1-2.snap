@@ -9,4 +9,9 @@ expression: reduced
     "Validator": "0x000000000000000000000000000000000000dead",
     "Fee(AVAX)": "1152921504.606846975",
     "Validator": "NodeID-2ZbTY9GatRTrfinAoYiYLcf6CvrPAUYgo",
+    "Amount": "0.000000001 AVAX to ",
+    "Funds locked": "0.000000001 AVAX until 1972-10-11 12:25:21 UTC",
+    "Amount": "0.001 AVAX to ",
+    "Address": "fuji1g32kvaugnx4tk3z4vemc3xd2hdz92enhfvw32u",
+    "Funds locked": "0.001 AVAX until 1997-10-11 04:13:30 UTC",
 ]
