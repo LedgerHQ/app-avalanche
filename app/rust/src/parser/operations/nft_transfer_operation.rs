@@ -57,7 +57,10 @@ impl<'b> FromBytes<'b> for NFTTransferOperation<'b> {
         let (rem, _) = tag(Self::TYPE_ID.to_be_bytes())(input)?;
 
         let (rem, num_indices) = be_u32(rem)?;
-        let (rem, indices) = take(num_indices as usize * U32_SIZE)(rem)?;
+        let indices_len = (num_indices as usize)
+            .checked_mul(U32_SIZE)
+            .ok_or(ParserError::ValueOutOfRange)?;
+        let (rem, indices) = take(indices_len)(rem)?;
         let indices = bytemuck::try_cast_slice(indices).apdu_unwrap();
 
         let out = out.as_mut_ptr();

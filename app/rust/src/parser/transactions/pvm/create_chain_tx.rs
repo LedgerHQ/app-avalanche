@@ -24,7 +24,8 @@ use crate::{
     handlers::handle_ui_message,
     parser::{
         cb58_output_len, nano_avax_to_fp_str, BaseTxFields, DisplayableItem, FromBytes, Header,
-        ParserError, PvmOutput, SubnetAuth, SubnetId, CB58_CHECKSUM_LEN, PVM_CREATE_CHAIN, U64_FORMATTED_SIZE
+        ParserError, PvmOutput, SubnetAuth, SubnetId, CB58_CHECKSUM_LEN, PVM_CREATE_CHAIN,
+        U64_FORMATTED_SIZE,
     },
     utils::{bs58_encode, hex_encode, ApduPanic},
 };
@@ -97,7 +98,12 @@ impl<'b> FromBytes<'b> for CreateChainTx<'b> {
         let vm_id = arrayref::array_ref!(vm_id, 0, VM_ID_LEN);
 
         let (rem, num_fx_id) = be_u32(rem)?;
-        let (rem, fx_id) = take(num_fx_id as usize * FX_ID_LEN)(rem)?;
+        // FX_ID_LEN is 32, so this one wraps from a smaller num_fx_id than the
+        // U32_SIZE sites do.
+        let fx_id_len = (num_fx_id as usize)
+            .checked_mul(FX_ID_LEN)
+            .ok_or(ParserError::ValueOutOfRange)?;
+        let (rem, fx_id) = take(fx_id_len)(rem)?;
 
         // This would not fail as previous line ensures we take
         // the right amount of bytes, also the alignemnt is correct
