@@ -603,16 +603,24 @@ __Z_INLINE void eth_dispatch(volatile uint32_t *flags, volatile uint32_t *tx, ui
 
     switch (G_io_apdu_buffer[OFFSET_INS]) {
 #if defined(FEATURE_ETH)
+        // These four reach a signing flow and accumulate the typed-data state
+        // that flow signs over, so they need the same PIN gate every other
+        // instruction in both dispatchers already carries. They were the only
+        // cases without it.
         case INS_SIGN_EIP_712_MESSAGE:
+            CHECK_PIN_VALIDATED()
             handle_eip712(flags, tx, rx);
             break;
         case INS_EIP712_STRUCT_DEF:
+            CHECK_PIN_VALIDATED()
             handle_eip712(flags, tx, rx);
             break;
         case INS_EIP712_STRUCT_IMPL:
+            CHECK_PIN_VALIDATED()
             handle_eip712(flags, tx, rx);
             break;
         case INS_EIP712_FILTERING:
+            CHECK_PIN_VALIDATED()
             handle_eip712(flags, tx, rx);
             break;
 #endif
