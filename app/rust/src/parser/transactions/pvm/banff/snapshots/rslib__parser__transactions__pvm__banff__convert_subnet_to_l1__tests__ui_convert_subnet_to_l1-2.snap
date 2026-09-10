@@ -6,9 +6,12 @@ expression: reduced
 [
     "ConvertSubnetToL1": "Transaction",
     "Chain ID": "0x3132333435363738212223242526272811121314151617180102030405060708",
-    "Validator": "0x000000000000000000000000000000000000dead",
+    "Manager": "0x000000000000000000000000000000000000dead",
+    "SubnetID": "SkB92YpWm4UpburLz9tEKZw2i67H3FF6YkjaU4BkFUDTG9Xm",
     "Fee(AVAX)": "1152921504.606846975",
     "Validator": "NodeID-2ZbTY9GatRTrfinAoYiYLcf6CvrPAUYgo",
+    "Weight": "72623859790382856",
+    "Balance (AVAX)": "1",
     "Amount": "0.000000001 AVAX to ",
     "Funds locked": "0.000000001 AVAX until 1972-10-11 12:25:21 UTC",
     "Amount": "0.001 AVAX to ",

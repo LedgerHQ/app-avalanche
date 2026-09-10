@@ -19,6 +19,8 @@ use nom::bytes::complete::{tag, take};
 use nom::number::complete::be_u32;
 use zemu_sys::ViewError;
 
+use crate::parser::u64_to_str;
+use crate::utils::is_app_mode_expert;
 use crate::checked_add;
 use crate::parser::chain_id::ChainId;
 use crate::{
@@ -45,7 +47,19 @@ pub struct ConvertSubnetToL1Tx<'b> {
     pub subnet_auth: SubnetAuth<'b>,
 }
 
-pub const BASE_FIELDS_LEN: u8 = 4;
+// description, chain_id, manager address, subnet_id, fee
+pub const BASE_FIELDS_LEN: u8 = 5;
+
+/// Screens contributed by each validator: its node id always, plus the weight
+/// and balance it is being given in expert mode. A convert can carry many
+/// validators, so the detail is gated to keep an ordinary review readable.
+fn validator_items() -> u8 {
+    if is_app_mode_expert() {
+        3
+    } else {
+        1
+    }
+}
 
 impl<'b> ConvertSubnetToL1Tx<'b> {
 
@@ -149,7 +163,7 @@ impl DisplayableItem for ConvertSubnetToL1Tx<'_> {
         checked_add!(
             ViewError::Unknown,
             BASE_FIELDS_LEN,
-            self.num_validators() as u8,
+            (self.num_validators() * validator_items() as usize) as u8,
             self.base_tx.base_outputs_num_items()?
         )
     }
@@ -173,7 +187,10 @@ impl DisplayableItem for ConvertSubnetToL1Tx<'_> {
             }
             1 => self.chain_id.render_item(0, title, message, page),
             2 => {
-                let label = pic_str!(b"Validator");
+                // This is the address of the contract that will manage the L1,
+                // not a validator. It was labelled "Validator", which named the
+                // wrong role for the one address the user is authorising here.
+                let label = pic_str!(b"Manager");
                 title[..label.len()].copy_from_slice(label);
 
                 // prefix
@@ -186,7 +203,8 @@ impl DisplayableItem for ConvertSubnetToL1Tx<'_> {
 
                 handle_ui_message(&out[..sz], message, page)
             }
-            3 => {
+            3 => self.subnet_id.render_item(0, title, message, page),
+            4 => {
                 let label = pic_str!(b"Fee(AVAX)");
                 title[..label.len()].copy_from_slice(label);
 
@@ -196,8 +214,13 @@ impl DisplayableItem for ConvertSubnetToL1Tx<'_> {
 
                 handle_ui_message(fee_buff, message, page)
             }
-            x @ 4.. if (x as usize) < 4 + self.num_validators() => {
-                let validator_n = x - 4;
+            x @ 5.. if (x as usize)
+                < BASE_FIELDS_LEN as usize
+                    + self.num_validators() * validator_items() as usize =>
+            {
+                let offset = x - BASE_FIELDS_LEN;
+                let per = validator_items();
+                let validator_n = offset / per;
                 // An item index past the last validator is a caller error, not
                 // a reason to abort the app: the arm is open-ended, so nothing
                 // bounds x against num_items. unwrap() here turned an
@@ -207,11 +230,28 @@ impl DisplayableItem for ConvertSubnetToL1Tx<'_> {
                     .validators
                     .get(validator_n.into())
                     .ok_or(ViewError::NoData)?;
-                // Print the chain ID for the validator
-                validator.node_id.render_item(0, title, message, page)
+
+                match offset % per {
+                    0 => validator.node_id.render_item(0, title, message, page),
+                    1 => {
+                        let label = pic_str!(b"Weight");
+                        title[..label.len()].copy_from_slice(label);
+                        let buf = u64_to_str(validator.weight, &mut buffer)
+                            .map_err(|_| ViewError::Unknown)?;
+                        handle_ui_message(buf, message, page)
+                    }
+                    _ => {
+                        let label = pic_str!(b"Balance (AVAX)");
+                        title[..label.len()].copy_from_slice(label);
+                        let buf = nano_avax_to_fp_str(validator.balance, &mut buffer[..])
+                            .map_err(|_| ViewError::Unknown)?;
+                        handle_ui_message(buf, message, page)
+                    }
+                }
             }
-            x @ 4.. => {
-                let output_n = x - 4 - self.num_validators() as u8;
+            x @ 5.. => {
+                let output_n =
+                    x - BASE_FIELDS_LEN - (self.num_validators() * validator_items() as usize) as u8;
                 let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
                 self.base_tx
                     .render_base_output_with_hrp(hrp, output_n, title, message, page)
