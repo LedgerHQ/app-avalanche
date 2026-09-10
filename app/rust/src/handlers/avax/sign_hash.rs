@@ -84,10 +84,9 @@ impl Sign {
         // Must be a canonical AVAX signing root (m/44'/9000'/account').
         verify_avax_root_path(&root_path).map_err(|_| ParserError::InvalidPath)?;
 
-        unsafe {
-            crate::lock_mut!(PATH).lock(Self).replace(root_path);
-        }
-
+        // Validate the whole request before touching the stored state.
+        // Replacing PATH first let a FIRST_MESSAGE with a bad hash length swap
+        // the root under a HASH left over from an earlier review.
         if rem.len() != Self::SIGN_HASH_SIZE {
             return Err(ParserError::ValueOutOfRange);
         }
@@ -96,6 +95,7 @@ impl Sign {
         unsigned_hash.copy_from_slice(rem);
 
         unsafe {
+            crate::lock_mut!(PATH).lock(Self).replace(root_path);
             crate::lock_mut!(HASH).lock(Self).replace(unsigned_hash);
         }
 
@@ -111,12 +111,13 @@ impl Sign {
         // Must be a canonical AVAX signing root (m/44'/9000'/account').
         verify_avax_root_path(&root_path)?;
 
-        unsafe {
-            crate::lock_mut!(PATH).lock(Self).replace(root_path);
-        }
-
+        // Same ordering as parse_hash: check the length before replacing PATH.
         if rem.len() != Self::SIGN_HASH_SIZE {
             return Err(Error::WrongLength);
+        }
+
+        unsafe {
+            crate::lock_mut!(PATH).lock(Self).replace(root_path);
         }
 
         let mut unsigned_hash = [0; Self::SIGN_HASH_SIZE];
@@ -219,7 +220,6 @@ impl ApduHandler for Sign {
         sys::zemu_log_stack("SignHash::handle\x00");
 
         *tx = 0;
-        let mut offset = 0;
 
         let p1 = buffer.p1();
         let cdata = buffer.payload().map_err(|_| Error::DataInvalid)?;
@@ -229,8 +229,36 @@ impl ApduHandler for Sign {
         // either for signing transactions, messages or a hash all of them,
         // previously reviewed.
         if p1 == FIRST_MESSAGE {
-            return Self::start_sign(cdata, flags).map(|_| ());
+            let result = Self::start_sign(cdata, flags).map(|_| ());
+            // A refused FIRST_MESSAGE starts no session, and must not leave
+            // an earlier one live either.
+            if result.is_err() {
+                let _ = cleanup_globals();
+            }
+            return result;
         }
+
+        let result = Self::sign_with_suffix(buffer, tx);
+
+        // LAST_MESSAGE is the host telling us it is done, and a host is free
+        // never to send it -- so it cannot be the only thing that releases the
+        // reviewed hash. A failure here ends the session just as definitively:
+        // whatever the host sent was refused, or the signature could not be
+        // produced, and in both cases leaving (PATH, HASH) live lets a later
+        // APDU still sign a hash that was reviewed for an earlier request.
+        if result.is_err() || p1 == LAST_MESSAGE {
+            let _ = cleanup_globals();
+        }
+
+        result
+    }
+}
+
+impl Sign {
+    #[inline(never)]
+    fn sign_with_suffix(buffer: ApduBufferRead<'_>, tx: &mut u32) -> Result<(), Error> {
+        let mut offset = 0;
+        let cdata = buffer.payload().map_err(|_| Error::DataInvalid)?;
 
         // retrieve signing info
         let path_prefix = Sign::get_signing_info(cdata)?;
@@ -273,10 +301,6 @@ impl ApduHandler for Sign {
         // write V at the end
         out[offset] = v;
         offset += 1;
-
-        if p1 == LAST_MESSAGE {
-            let _ = cleanup_globals();
-        }
 
         *tx = offset as _;
         Ok(())

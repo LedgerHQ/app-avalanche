@@ -85,6 +85,9 @@ pub unsafe extern "C" fn _clean_up_eth() {
 pub unsafe extern "C" fn _parse_sign_hash_tx(input: *const u8, len: u16) -> u32 {
     let data = core::slice::from_raw_parts(input, len as _);
     if let Err(e) = Sign::parse_hash(data) {
+        // This is the device's FIRST_MESSAGE path. A request that fails to
+        // parse starts no session, and must not leave an earlier one live.
+        _ = crate::handlers::avax::sign_hash::cleanup_globals();
         return e as _;
     }
     ParserError::ParserOk as _
