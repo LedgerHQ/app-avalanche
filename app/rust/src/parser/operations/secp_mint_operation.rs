@@ -14,6 +14,7 @@
 *  limitations under the License.
 ********************************************************************************/
 
+use crate::checked_add;
 use crate::parser::{DisplayableItem, SECPMintOutput, SECPTransferOutput};
 
 use crate::{
@@ -79,11 +80,18 @@ impl<'b> FromBytes<'b> for SECPMintOperation<'b> {
 
 impl DisplayableItem for SECPMintOperation<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        // operation description
-        // and the transfer to the new mint-output owners
-        self.transfer_output
-            .num_items()
-            .and_then(|a| a.checked_add(1).ok_or(ViewError::Unknown))
+        // operation description, the transfer to the new owners, and the mint
+        // output.
+        //
+        // The mint output was parsed and signed but never counted, so the one
+        // thing this operation decides -- who may mint this asset again after
+        // it completes -- was the one thing the review did not show.
+        checked_add!(
+            ViewError::Unknown,
+            1u8,
+            self.transfer_output.num_items()?,
+            self.mint_output.num_items()?
+        )
     }
 
     fn render_item(
@@ -103,6 +111,8 @@ impl DisplayableItem for SECPMintOperation<'_> {
         }
 
         let item_n = item_n as usize - 1;
+        let transfer_items = self.transfer_output.num_items()? as usize;
+        let mint_items = self.mint_output.num_items()? as usize;
 
         match item_n {
             0 => {
@@ -114,9 +124,15 @@ impl DisplayableItem for SECPMintOperation<'_> {
                 title[..title_content.len()].copy_from_slice(title_content);
                 res
             }
-            x @ 1.. if x < self.transfer_output.num_addresses() + 1 => self
-                .transfer_output
-                .render_item(x as _, title, message, page),
+            x @ 1.. if x < transfer_items => {
+                self.transfer_output.render_item(x as _, title, message, page)
+            }
+            x if x < transfer_items + mint_items => self.mint_output.render_item(
+                (x - transfer_items) as u8,
+                title,
+                message,
+                page,
+            ),
             _ => Err(ViewError::NoData),
         }
     }
@@ -147,5 +163,54 @@ mod tests {
         ];
 
         assert_eq!(secp_mint_operation.address_indices, address_bytes);
+    }
+
+    #[test]
+    fn secp_mint_operation_shows_the_mint_authority() {
+        let raw_input = [
+            0, 0, 0, 8, 0, 0, 0, 4, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 64, 0, 0, 0, 8, 0, 0, 0, 6, 0,
+            0, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 2, 157, 31, 52, 188, 58, 111, 35, 6, 202, 7,
+            144, 22, 174, 248, 92, 19, 23, 103, 242, 56, 22, 54, 119, 75, 103, 131, 141, 236, 22,
+            225, 106, 182, 207, 172, 178, 27, 136, 195, 168, 97, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 39,
+            16, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 1, 0, 0, 0, 1, 157, 31, 52, 188, 58, 111, 35, 6,
+            202, 7, 144, 22, 174, 248, 92, 19, 23, 103, 242, 56,
+        ];
+
+        let op = SECPMintOperation::from_bytes(&raw_input).unwrap().1;
+
+        // The mint output decides who may mint this asset again once the
+        // operation completes. It was parsed and signed but not counted, so
+        // none of its screens were reachable.
+        let mint_items = op.mint_output.num_items().expect("Overflow?");
+        assert!(mint_items > 0);
+
+        let items = op.num_items().expect("Overflow?");
+        assert_eq!(
+            items,
+            1 + op.transfer_output.num_items().expect("Overflow?") + mint_items
+        );
+
+        let mut title = [0u8; 64];
+        let mut message = [0u8; 256];
+        for i in 0..items {
+            assert!(
+                op.render_item(i, &mut title, &mut message, 0).is_ok(),
+                "counted item {} did not render",
+                i
+            );
+        }
+
+        // The mint authority's own screens sit after the transfer's.
+        let first_mint = 1 + op.transfer_output.num_items().expect("Overflow?");
+        title.iter_mut().for_each(|v| *v = 0);
+        op.render_item(first_mint, &mut title, &mut message, 0)
+            .unwrap();
+        let mut expected = [0u8; 64];
+        op.mint_output
+            .render_item(0, &mut expected, &mut [0u8; 256], 0)
+            .unwrap();
+        assert_eq!(title, expected);
+
+        assert!(op.render_item(items, &mut title, &mut message, 0).is_err());
     }
 }
