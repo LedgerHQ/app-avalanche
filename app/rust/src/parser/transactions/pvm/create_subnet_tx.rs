@@ -59,14 +59,13 @@ impl<'b> CreateSubnetTx<'b> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, zemu_sys::ViewError> {
-        use bolos::{pic_str, PIC};
-
-        let label = pic_str!(b"Owner address");
-        title[..label.len()].copy_from_slice(label);
-
+        // addr_idx is an index into the owners' counted items, not into their
+        // address list: num_items includes a Locktime screen ahead of the
+        // addresses when locktime is non-zero. Treating it as an address index
+        // skipped that screen and ran the last index past the end of the list.
         let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
         self.owners
-            .render_address_with_hrp(hrp, addr_idx, message, page)
+            .render_item_with_hrp(hrp, addr_idx as u8, title, message, page)
     }
 }
 
