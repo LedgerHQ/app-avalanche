@@ -36,7 +36,11 @@
 #define PATH_MAX_SIZE_ED25519 80
 
 // Use to hold the addr_ui object, used by rust to display the address
-uint8_t addr_ui_obj[ADDR_UI_MAX_SIZE] = {0};
+// File-local: wallet_id.c defines a same-named buffer of a different size,
+// and the link accepts that today only because -z muldefs keeps whichever
+// object the linker sees first. Internal linkage removes the collision
+// instead of relying on that ordering.
+static uint8_t addr_ui_obj[ADDR_UI_MAX_SIZE] = {0};
 
 zxerr_t app_fill_ed25519_address(uint8_t *buffer, uint16_t buffer_len, uint16_t *addr_len) {
     return crypto_fill_ed25519_address(buffer, buffer_len, addr_len);
