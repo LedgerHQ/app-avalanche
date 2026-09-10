@@ -104,25 +104,14 @@ impl<'b> FromBytes<'b> for ImportTx<'b> {
 impl<'b> ImportTx<'b> {
     pub const TYPE_ID: u32 = EVM_IMPORT_TX;
 
-    pub fn disable_output_if(&mut self, address: &[u8]) {
-        let num_outs = self.outputs.iter().count();
-        // skip filtering out outputs if there is only one
-        if num_outs <= 1 {
-            return;
-        }
-
-        let mut idx = 0;
-        let mut render = self.renderable_out;
-        self.outputs.iterate_with(|o| {
-            // The 99.99% of the outputs contain only one address(best case),
-            // In the worse case we just show every output.
-            if o.address().raw_address().as_slice() == address {
-                render ^= 1 << idx;
-            }
-            idx += 1;
-        });
-        self.renderable_out = render;
-    }
+    // No disable_output_if here on purpose. An EVMOutput carries a 20-byte EVM
+    // address, while the change filter matches ripemd160(sha256(pubkey)) -- two
+    // different constructions, so in honest use nothing ever matched and the
+    // filter was dead. What it did allow was a host that had read the key hash
+    // through GetPublicKey to craft an EVMOutput whose address equalled it and
+    // have the device hide that output, sending funds to an address no key can
+    // ever spend without showing it. Nothing legitimate is lost by not
+    // filtering here: C-chain imports credit an EVM account directly.
 
     fn fee(&self) -> Result<u64, ParserError> {
         let inputs = self.sum_inputs_amount()?;
@@ -135,7 +124,6 @@ impl<'b> ImportTx<'b> {
     }
 
     fn fee_to_fp_str(&self, out_str: &'b mut [u8]) -> Result<&mut [u8], ParserError> {
-
         let fee = self.fee()?;
 
         // the number plus '0.'
@@ -269,7 +257,6 @@ impl DisplayableItem for ImportTx<'_> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, zemu_sys::ViewError> {
-
         if item_n == 0 {
             let title_content = pic_str!(b"ImportTx");
             title[..title_content.len()].copy_from_slice(title_content);

@@ -279,7 +279,10 @@ impl<'b> Transaction<'b> {
             Self::PImport(tx) => tx.disable_output_if(address),
             Self::PExport(tx) => tx.disable_output_if(address),
             Self::Transfer(tx) => tx.disable_output_if(address),
-            Self::CImport(tx) => tx.disable_output_if(address),
+            // CImport is deliberately absent: its outputs are EVM addresses,
+            // which are a different construction from the AVAX key hash this
+            // filter matches on, so a match can only ever be contrived. See
+            // coreth/import_tx.rs.
             Self::CExport(tx) => tx.disable_output_if(address),
             Self::PBase(tx) => tx.disable_output_if(address),
             #[cfg(feature = "add-validator")]
