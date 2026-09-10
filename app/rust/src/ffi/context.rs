@@ -17,9 +17,8 @@
 use bolos_common::bip32::BIP32Path;
 
 use crate::{
-    constants::BIP32_PATH_PREFIX_DEPTH,
     handlers::{
-        avax::{sign_hash::Sign as SignHash, signing::Sign},
+        avax::{sign_hash::Sign as SignHash, signing::Sign, verify_avax_root_path},
         resources::{HASH, PATH},
     },
     parser::ParserError,
@@ -107,8 +106,12 @@ pub unsafe extern "C" fn _set_root_path(raw_path: *const u8, path_len_bytes: u16
     let Ok(root_path) = BIP32Path::read(path) else {
         return ParserError::InvalidPath as u32;
     };
-    //We expect a path prefix of the form x'/x'/x'
-    if root_path.components().len() != BIP32_PATH_PREFIX_DEPTH {
+    // This is the entry the C signing flow uses, so the same root-path rules
+    // the Rust handlers apply have to hold here too: 44' purpose, a 9000' or
+    // 60' coin type, three hardened components. A depth check alone would let
+    // a foreign-coin or unhardened root through on the path that actually
+    // ships.
+    if verify_avax_root_path(&root_path).is_err() {
         return ParserError::InvalidPath as u32;
     }
 

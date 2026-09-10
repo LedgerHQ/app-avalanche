@@ -69,8 +69,10 @@ zxerr_t _wallet_get_item(uint8_t *wallet_obj, uint8_t display_idx, uint8_t *out_
                          uint16_t out_len, uint8_t page_idx, uint8_t *page_count);
 
 // Set on the rust side the root path.
-// path_len is in bytes
-void _set_root_path(const uint8_t *path, uint16_t path_len);
+// path_len is in bytes.
+// Returns parser_ok, or a parser error when the path is not a valid signing
+// root. Declaring it void here is what let callers drop that result.
+parser_error_t _set_root_path(const uint8_t *path, uint16_t path_len);
 
 // Set the AVAX transaction hash, for the next step where we sign that hash with a list
 // of signers.

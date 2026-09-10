@@ -89,8 +89,14 @@ void extractHDPath(uint32_t rx, uint32_t offset) {
     // later we can make rust ask for it but it would change other logic
     // in the crypto module.
     // len_bytes + 1 to include the first byte that tells the number
-    // of elements in the path list
-    _set_root_path(&G_io_apdu_buffer[offset], len_bytes + 1);
+    // of elements in the path list.
+    // The return code carries the root-path validation result, so it has to be
+    // acted on: discarding it left a rejected path silently falling back to
+    // whatever PATH still held from an earlier request, which is the opposite
+    // of rejecting it.
+    if (_set_root_path(&G_io_apdu_buffer[offset], len_bytes + 1) != parser_ok) {
+        THROW(APDU_CODE_DATA_INVALID);
+    }
 }
 
 void extractHDPathEd25519(uint32_t rx, uint32_t offset) {

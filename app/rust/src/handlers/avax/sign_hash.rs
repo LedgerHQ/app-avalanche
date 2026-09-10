@@ -22,12 +22,13 @@ use zemu_sys::{Show, ViewError, Viewable};
 
 use crate::{
     constants::{
-        ApduError as Error, BIP32_PATH_PREFIX_DEPTH, BIP32_PATH_SUFFIX_DEPTH, FIRST_MESSAGE,
-        LAST_MESSAGE, MAX_BIP32_PATH_DEPTH,
+        ApduError as Error, BIP32_PATH_SUFFIX_DEPTH, FIRST_MESSAGE, LAST_MESSAGE,
+        MAX_BIP32_PATH_DEPTH,
     },
     crypto::{Curve, ECCInfoFlags},
     dispatcher::ApduHandler,
     handlers::{
+        avax::verify_avax_root_path,
         handle_ui_message,
         resources::{HASH, PATH},
     },
@@ -80,11 +81,8 @@ impl Sign {
         let rem =
             PathWrapper::from_bytes_into(data, &mut path).map_err(|_| ParserError::InvalidPath)?;
         let root_path = unsafe { path.assume_init().path() };
-
-        //We expect a path prefix of the form x'/x'/x'
-        if root_path.components().len() != BIP32_PATH_PREFIX_DEPTH {
-            return Err(ParserError::InvalidPath);
-        }
+        // Must be a canonical AVAX signing root (m/44'/9000'/account').
+        verify_avax_root_path(&root_path).map_err(|_| ParserError::InvalidPath)?;
 
         unsafe {
             crate::lock_mut!(PATH).lock(Self).replace(root_path);
@@ -110,11 +108,8 @@ impl Sign {
         let mut path = MaybeUninit::uninit();
         let rem = PathWrapper::from_bytes_into(data, &mut path).map_err(|_| Error::Unknown)?;
         let root_path = unsafe { path.assume_init().path() };
-
-        //We expect a path prefix of the form x'/x'/x'
-        if root_path.components().len() != BIP32_PATH_PREFIX_DEPTH {
-            return Err(Error::WrongLength);
-        }
+        // Must be a canonical AVAX signing root (m/44'/9000'/account').
+        verify_avax_root_path(&root_path)?;
 
         unsafe {
             crate::lock_mut!(PATH).lock(Self).replace(root_path);
@@ -135,12 +130,10 @@ impl Sign {
     }
 
     pub fn get_signing_info(data: &[u8]) -> Result<BIP32Path<MAX_BIP32_PATH_DEPTH>, Error> {
+        // The stored prefix must still be a canonical AVAX signing root
+        // (m/44'/9000'/account'); re-check on every continuation APDU.
         let path_prefix = Self::get_derivation_info()?;
-
-        //We expect a path prefix of the form x'/x'/x'
-        if path_prefix.components().len() != BIP32_PATH_PREFIX_DEPTH {
-            return Err(Error::WrongLength);
-        }
+        verify_avax_root_path(path_prefix)?;
 
         let suffix: BIP32Path<BIP32_PATH_SUFFIX_DEPTH> =
             BIP32Path::read(data).map_err(|_| Error::DataInvalid)?;
@@ -201,7 +194,6 @@ impl Viewable for SignUI {
 
         handle_ui_message(&hex[..size], message, page)
     }
-
 
     fn accept(&mut self, _out: &mut [u8]) -> (usize, u16) {
         let tx = 0;

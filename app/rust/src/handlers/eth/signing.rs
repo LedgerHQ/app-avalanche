@@ -33,13 +33,16 @@ use crate::{
         RECEIVED_BYTES, SECOND_LAST_PACKET, STREAMING_CHAIN_ID, STREAMING_HASH, STREAMING_HASHER,
         STREAMING_MODE, STREAMING_MODE_USED, STREAMING_TX_TYPE,
     },
-    parser::{bytes_to_u64, is_avax_chain_bytes, DisplayableItem, EthTransaction, FromBytes, U32_SIZE},
+    parser::{
+        bytes_to_u64, is_avax_chain_bytes, DisplayableItem, EthTransaction, FromBytes, U32_SIZE,
+    },
     sys,
     utils::{convert_der_to_rs, is_app_mode_blind_sign, ApduBufferRead},
 };
 
 use super::utils::get_tx_rlp_len;
 use super::utils::parse_bip32_eth;
+use super::verify_coreth_root_path;
 
 /// Right-align a big-endian chain ID slice into a fixed 8-byte array, matching
 /// `bytes_to_u64`'s layout. Right-alignment is required so chain IDs whose low
@@ -302,7 +305,8 @@ impl Sign {
 
         // Retrieve stored transaction metadata for V calculation
         let is_typed = unsafe {
-            let stored_is_typed = *crate::lock_mut!(STREAMING_TX_TYPE).lock(StreamingAccessors::EthSign);
+            let stored_is_typed =
+                *crate::lock_mut!(STREAMING_TX_TYPE).lock(StreamingAccessors::EthSign);
             stored_is_typed
         };
 
@@ -313,7 +317,8 @@ impl Sign {
             if is_legacy {
                 // Try to extract chain ID from buffered packets
                 let last = crate::lock_mut!(LAST_PACKET).lock(StreamingAccessors::EthSign);
-                let second_last = crate::lock_mut!(SECOND_LAST_PACKET).lock(StreamingAccessors::EthSign);
+                let second_last =
+                    crate::lock_mut!(SECOND_LAST_PACKET).lock(StreamingAccessors::EthSign);
 
                 // Combine last two packets if available
                 let chain_id_from_end = if let (Some(last_packet), Some(second_last_packet)) =
@@ -345,7 +350,8 @@ impl Sign {
 
                 // If we found chain ID in legacy packets, store it
                 if let Some(chain_id_bytes) = chain_id_from_end {
-                    *crate::lock_mut!(STREAMING_CHAIN_ID).lock(StreamingAccessors::EthSign) = Some(chain_id_bytes);
+                    *crate::lock_mut!(STREAMING_CHAIN_ID).lock(StreamingAccessors::EthSign) =
+                        Some(chain_id_bytes);
                     Some(chain_id_bytes)
                 } else {
                     // Fallback to stored value (should be None for legacy)
@@ -411,6 +417,7 @@ impl Sign {
                 //parse path to verify it's the data we expect
                 let (rest, bip32_path) =
                     parse_bip32_eth(payload).map_err(|_| ParserError::InvalidPath)?;
+                verify_coreth_root_path(&bip32_path).map_err(|_| ParserError::InvalidPath)?;
 
                 unsafe {
                     crate::lock_mut!(PATH).lock(Self).replace(bip32_path);
@@ -457,16 +464,20 @@ impl Sign {
                             .lock(StreamingAccessors::EthSign)
                             .replace(hasher);
                         *crate::lock_mut!(STREAMING_MODE).lock(StreamingAccessors::EthSign) = true;
-                        *crate::lock_mut!(EXPECTED_BYTES).lock(StreamingAccessors::EthSign) = to_read;
+                        *crate::lock_mut!(EXPECTED_BYTES).lock(StreamingAccessors::EthSign) =
+                            to_read;
                         *crate::lock_mut!(RECEIVED_BYTES).lock(StreamingAccessors::EthSign) =
                             (len as u64).saturating_sub(read as u64);
 
                         // Store transaction metadata for V calculation
-                        *crate::lock_mut!(STREAMING_TX_TYPE).lock(StreamingAccessors::EthSign) = is_typed;
-                        *crate::lock_mut!(STREAMING_CHAIN_ID).lock(StreamingAccessors::EthSign) = chain_id_bytes;
+                        *crate::lock_mut!(STREAMING_TX_TYPE).lock(StreamingAccessors::EthSign) =
+                            is_typed;
+                        *crate::lock_mut!(STREAMING_CHAIN_ID).lock(StreamingAccessors::EthSign) =
+                            chain_id_bytes;
 
                         // Track if this is a legacy transaction
-                        *crate::lock_mut!(IS_LEGACY_TX).lock(StreamingAccessors::EthSign) = is_legacy;
+                        *crate::lock_mut!(IS_LEGACY_TX).lock(StreamingAccessors::EthSign) =
+                            is_legacy;
 
                         // For legacy, store first packet for potential single-packet case
                         if is_legacy && len <= 254 {
@@ -514,17 +525,22 @@ impl Sign {
                 let payload = buffer.payload().map_err(|_| ParserError::NoData)?;
 
                 // Check if we're in streaming mode
-                let streaming = unsafe { *crate::lock_mut!(STREAMING_MODE).lock(StreamingAccessors::EthSign) };
+                let streaming =
+                    unsafe { *crate::lock_mut!(STREAMING_MODE).lock(StreamingAccessors::EthSign) };
 
                 if streaming {
                     // For legacy transactions, buffer packets for chain ID extraction
-                    let is_legacy = unsafe { *crate::lock_mut!(IS_LEGACY_TX).lock(StreamingAccessors::EthSign) };
+                    let is_legacy = unsafe {
+                        *crate::lock_mut!(IS_LEGACY_TX).lock(StreamingAccessors::EthSign)
+                    };
 
                     if is_legacy && !payload.is_empty() {
                         // Rotate packet buffers: last -> second_last, current -> last
                         unsafe {
-                            let last = crate::lock_mut!(LAST_PACKET).lock(StreamingAccessors::EthSign);
-                            let second_last = crate::lock_mut!(SECOND_LAST_PACKET).lock(StreamingAccessors::EthSign);
+                            let last =
+                                crate::lock_mut!(LAST_PACKET).lock(StreamingAccessors::EthSign);
+                            let second_last = crate::lock_mut!(SECOND_LAST_PACKET)
+                                .lock(StreamingAccessors::EthSign);
 
                             // Move last to second_last (if it exists)
                             *second_last = *last;
@@ -554,12 +570,14 @@ impl Sign {
                     }
 
                     // Update received bytes counter
-                    let received_bytes =
-                        unsafe { crate::lock_mut!(RECEIVED_BYTES).lock(StreamingAccessors::EthSign) };
+                    let received_bytes = unsafe {
+                        crate::lock_mut!(RECEIVED_BYTES).lock(StreamingAccessors::EthSign)
+                    };
                     *received_bytes = received_bytes.saturating_add(payload.len() as u64);
 
-                    let expected_bytes =
-                        unsafe { *crate::lock_mut!(EXPECTED_BYTES).lock(StreamingAccessors::EthSign) };
+                    let expected_bytes = unsafe {
+                        *crate::lock_mut!(EXPECTED_BYTES).lock(StreamingAccessors::EthSign)
+                    };
 
                     if *received_bytes >= expected_bytes {
                         Self::finalize_streaming_hash()?;
@@ -634,6 +652,7 @@ impl ApduHandler for Sign {
                 //parse path to verify it's the data we expect
                 let (rest, bip32_path) =
                     parse_bip32_eth(payload).map_err(|_| Error::DataInvalid)?;
+                verify_coreth_root_path(&bip32_path)?;
 
                 unsafe {
                     crate::lock_mut!(PATH).lock(Self).replace(bip32_path);
@@ -862,7 +881,9 @@ pub fn cleanup_globals() -> Result<(), Error> {
         // transaction was rejected.
         #[cfg(feature = "erc721")]
         {
-            crate::lock_mut!(crate::handlers::resources::NFT_INFO).lock(Sign).take();
+            crate::lock_mut!(crate::handlers::resources::NFT_INFO)
+                .lock(Sign)
+                .take();
             //let's release the lock for the future
             _ = crate::lock_mut!(crate::handlers::resources::NFT_INFO).release(Sign);
         }
