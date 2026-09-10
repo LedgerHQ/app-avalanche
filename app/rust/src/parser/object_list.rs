@@ -241,7 +241,13 @@ where
             this.set_data_index(0);
         }
 
-        for _ in 0..index {
+        // Inclusive: the object being asked for is the one the last parse
+        // produces, so index 0 still has to parse once. The previous `0..index`
+        // form parsed nothing at all for index 0 and then handed back
+        // `out.assume_init()` over memory that was never written -- which is
+        // also why the one caller had to pass `index + 1` to get anything
+        // sensible.
+        for _ in 0..=index {
             // Attempt to parse the next object
             this.parse_next(&mut out)?;
         }
@@ -382,5 +388,32 @@ mod tests {
         // main list object, as we return just a copy
         assert_eq!(list.read, 0);
         assert!(num_items > 0);
+    }
+
+    #[test]
+    fn object_list_get_is_zero_based_and_bounded() {
+        let (_, list) = ObjectList::<TransferableOutput<AvmOutput>>::new(DATA).unwrap();
+
+        // Index 0 has to parse before it can return anything. Under the old
+        // `0..index` loop this branch returned `assume_init()` over memory that
+        // was never written, so run it first and compare it against the
+        // iterator, which is known good.
+        let first_via_get = list.get(0).expect("index 0 must yield the first element");
+        let first_via_iter = list.iter().next().expect("list is not empty");
+        assert_eq!(
+            first_via_get.num_items().expect("Overflow!"),
+            first_via_iter.num_items().expect("Overflow!")
+        );
+
+        // Every in-range index resolves, and the one past the end does not.
+        let count = list.iter().count();
+        assert_eq!(count, 10);
+        for i in 0..count {
+            assert!(list.get(i).is_some(), "index {} should resolve", i);
+        }
+        assert!(
+            list.get(count).is_none(),
+            "index past the end must be None, not a panic or a stale object"
+        );
     }
 }

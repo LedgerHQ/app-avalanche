@@ -25,7 +25,8 @@ use crate::{
     handlers::handle_ui_message,
     parser::{
         l1_validator::L1Validator, nano_avax_to_fp_str, BaseTxFields, DisplayableItem, FromBytes,
-        Header, ObjectList, ParserError, PvmOutput, SubnetAuth, SubnetId, PVM_CONVERT_SUBNET_L1, U64_FORMATTED_SIZE
+        Header, ObjectList, ParserError, PvmOutput, SubnetAuth, SubnetId, PVM_CONVERT_SUBNET_L1,
+        U64_FORMATTED_SIZE,
     },
 };
 
@@ -186,7 +187,7 @@ impl DisplayableItem for ConvertSubnetToL1Tx<'_> {
             }
             x @ 4.. => {
                 let validator_n = x - 4;
-                let validator = self.validators.get((validator_n + 1).into()).unwrap();
+                let validator = self.validators.get(validator_n.into()).unwrap();
                 // Print the chain ID for the validator
                 validator.node_id.render_item(0, title, message, page)
             }
