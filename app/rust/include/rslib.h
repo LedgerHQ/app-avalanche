@@ -90,6 +90,8 @@ parser_error_t _parse_sign_hash_tx(uint8_t *input, uint16_t len);
 
 void _clean_up_hash();
 
+void _clean_up_eth();
+
 // Fill buffer with wallet id computed in rust.
 zxerr_t _app_fill_wallet(uint32_t *tx, uint32_t rx, uint8_t *buffer, uint16_t buffer_len, uint8_t *wallet_ui,
                          uint16_t wallet_ui_len);

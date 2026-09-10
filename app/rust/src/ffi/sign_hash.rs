@@ -67,6 +67,20 @@ pub unsafe extern "C" fn _clean_up_hash() {
     _ = crate::handlers::avax::sign_hash::cleanup_globals();
 }
 
+/// Release the ETH signing globals, including the streaming hash and the flag
+/// that selects the blind-signing review.
+///
+/// The Rust `reject` for the ETH flow already does this, but nothing on the C
+/// side calls it: a refused review goes through `app_reject`, which returns to
+/// the host without telling the Rust handler. That left STREAMING_MODE_USED and
+/// STREAMING_HASH set, so the next ETH review rendered the previous hash while
+/// signing the new transaction -- the same shape as the sign-hash leak, on the
+/// other handler.
+#[no_mangle]
+pub unsafe extern "C" fn _clean_up_eth() {
+    _ = crate::handlers::eth::signing::cleanup_globals();
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn _parse_sign_hash_tx(input: *const u8, len: u16) -> u32 {
     let data = core::slice::from_raw_parts(input, len as _);
