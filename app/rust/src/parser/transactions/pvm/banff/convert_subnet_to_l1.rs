@@ -187,7 +187,15 @@ impl DisplayableItem for ConvertSubnetToL1Tx<'_> {
             }
             x @ 4.. => {
                 let validator_n = x - 4;
-                let validator = self.validators.get(validator_n.into()).unwrap();
+                // An item index past the last validator is a caller error, not
+                // a reason to abort the app: the arm is open-ended, so nothing
+                // bounds x against num_items. unwrap() here turned an
+                // out-of-range review index into a panic, which on this target
+                // is an immediate abort.
+                let validator = self
+                    .validators
+                    .get(validator_n.into())
+                    .ok_or(ViewError::NoData)?;
                 // Print the chain ID for the validator
                 validator.node_id.render_item(0, title, message, page)
             }
@@ -259,6 +267,34 @@ mod tests {
 
             let reduced = pages.iter().map(ReducedPage::from).collect::<Vec<_>>();
             insta::assert_debug_snapshot!(reduced);
+        }
+    }
+
+    #[test]
+    fn convert_subnet_to_l1_out_of_range_item_is_an_error() {
+        let mut title = [0u8; 64];
+        let mut message = [0u8; 256];
+
+        for data in [SIMPLE_CONVERT_SUBNET, COMPLEX_CONVERT_SUBNET] {
+            let (_, tx) = ConvertSubnetToL1Tx::from_bytes(data).unwrap();
+            let items = tx.num_items().expect("Overflow?");
+
+            // Every advertised item renders.
+            for i in 0..items {
+                assert!(
+                    tx.render_item(i, &mut title, &mut message, 0).is_ok(),
+                    "advertised item {} should render",
+                    i
+                );
+            }
+
+            // The first index past the end must report NoData. The validator
+            // arm is open-ended, so nothing else bounds it, and it used to
+            // unwrap().
+            assert!(tx.render_item(items, &mut title, &mut message, 0).is_err());
+            assert!(tx
+                .render_item(u8::MAX, &mut title, &mut message, 0)
+                .is_err());
         }
     }
 }
