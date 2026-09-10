@@ -17,7 +17,8 @@ use crate::checked_add;
 use crate::handlers::handle_ui_message;
 use crate::parser::{
     nano_avax_to_fp_str, AvmOutput, BaseTxFields, ChainId, DisplayableItem, FromBytes, Header,
-    ObjectList, ParserError, TransferableOp, AVM_OPERATION_TX, MAX_ADDRESS_ENCODED_LEN, U64_FORMATTED_SIZE
+    ObjectList, ParserError, TransferableOp, AVM_OPERATION_TX, MAX_ADDRESS_ENCODED_LEN,
+    U64_FORMATTED_SIZE,
 };
 use core::{mem::MaybeUninit, ptr::addr_of_mut};
 use nom::bytes::complete::tag;
@@ -228,7 +229,8 @@ impl DisplayableItem for OperationTx<'_> {
             x if x >= base_items && x < self.num_items()? - 2 => {
                 let x = item_n - base_items;
                 let (op, idx) = self.op_with_item(x).map_err(|_| ViewError::NoData)?;
-                op.render_item(idx, title, message, page)
+                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+                op.render_item_with_hrp(hrp, idx, title, message, page)
             }
             x if x == self.num_items()? - 2 => {
                 let title_content = pic_str!(b"Fee(AVAX)");

@@ -98,6 +98,35 @@ impl<'b> FromBytes<'b> for Address<'b> {
     }
 }
 
+impl Address<'_> {
+    /// Render this address as bech32 under `hrp`, titled "Address".
+    ///
+    /// Callers that know the network must pass its HRP. Encoding with an empty
+    /// one does not merely drop a prefix: the bech32 checksum covers the HRP,
+    /// so the trailing characters change too and the result is a string no
+    /// wallet can decode or match against what it displays.
+    pub fn render_with_hrp(
+        &self,
+        hrp: &str,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
+        use bolos::{pic_str, PIC};
+
+        let mut addr = [0; MAX_ADDRESS_ENCODED_LEN];
+
+        let len = self
+            .encode_into(hrp, &mut addr[..])
+            .map_err(|_| ViewError::Unknown)?;
+
+        let title_content = pic_str!(b"Address");
+        title[..title_content.len()].copy_from_slice(title_content);
+
+        handle_ui_message(&addr[..len], message, page)
+    }
+}
+
 impl DisplayableItem for Address<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
         Ok(1)
@@ -115,16 +144,7 @@ impl DisplayableItem for Address<'_> {
             return Err(ViewError::NoData);
         }
 
-        let mut addr = [0; MAX_ADDRESS_ENCODED_LEN];
-
-        let len = self
-            .encode_into("", &mut addr[..])
-            .map_err(|_| ViewError::Unknown)?;
-
-        let title_content = pic_str!(b"Address");
-        title[..title_content.len()].copy_from_slice(title_content);
-
-        handle_ui_message(&addr[..len], message, page)
+        self.render_with_hrp("", title, message, page)
     }
 }
 

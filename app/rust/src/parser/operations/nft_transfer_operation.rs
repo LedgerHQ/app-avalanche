@@ -77,6 +77,20 @@ impl<'b> FromBytes<'b> for NFTTransferOperation<'b> {
     }
 }
 
+impl NFTTransferOperation<'_> {
+    pub fn render_item_with_hrp(
+        &self,
+        hrp: &str,
+        item_n: u8,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, zemu_sys::ViewError> {
+        self.nft_transfer_output
+            .render_item_with_hrp(hrp, item_n, title, message, page)
+    }
+}
+
 impl DisplayableItem for NFTTransferOperation<'_> {
     fn num_items(&self) -> Result<u8, zemu_sys::ViewError> {
         self.nft_transfer_output.num_items()

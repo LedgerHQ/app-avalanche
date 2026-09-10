@@ -24,7 +24,10 @@ use zemu_sys::ViewError;
 use crate::{
     checked_add,
     handlers::handle_ui_message,
-    parser::{u32_to_str, Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES, U32_FORMATTED_SIZE},
+    parser::{
+        u32_to_str, Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES,
+        U32_FORMATTED_SIZE,
+    },
     utils::hex_encode,
 };
 
@@ -135,6 +138,22 @@ impl DisplayableItem for NFTTransferOutput<'_> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
+        // No network context at this level; callers that have one should use
+        // render_item_with_hrp so the owner address is encoded for the right
+        // network instead of with an empty prefix.
+        self.render_item_with_hrp("", item_n, title, message, page)
+    }
+}
+
+impl NFTTransferOutput<'_> {
+    pub fn render_item_with_hrp(
+        &self,
+        hrp: &str,
+        item_n: u8,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
         use bolos::{pic_str, PIC};
 
         let mut buffer = [0; U32_FORMATTED_SIZE + 2];
@@ -191,7 +210,7 @@ impl DisplayableItem for NFTTransferOutput<'_> {
             x @ 2.. if x < self.num_addresses() + 2 => {
                 let idx = x - 2;
                 if let Some(addr) = self.get_address_at(idx) {
-                    let res = addr.render_item(0, title, message, page);
+                    let res = addr.render_with_hrp(hrp, title, message, page);
                     // render Owner instead of Address
                     title.iter_mut().for_each(|v| *v = 0);
                     let title_content = pic_str!(b"Owner: ");
