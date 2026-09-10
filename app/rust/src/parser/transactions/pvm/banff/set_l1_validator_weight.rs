@@ -9,7 +9,10 @@ use crate::{
 };
 use bolos::PIC;
 use core::{mem::MaybeUninit, ptr::addr_of_mut};
-use nom::{bytes::complete::tag, number::complete::be_u32};
+use nom::{
+    bytes::complete::{tag, take},
+    number::complete::be_u32,
+};
 use zemu_sys::ViewError;
 pub const VALIDATION_ID_LEN: usize = 32;
 pub const FIXED_FIELDS_LEN: u8 = 5;
@@ -48,13 +51,18 @@ impl<'b> FromBytes<'b> for SetL1ValidatorWeightTx<'b> {
 
         // warp_message
         let warp_message_start = rem;
-        let warp_message = unsafe { &mut *addr_of_mut!((*out).warp_message).cast() };
-        let _ = WarpMessage::from_bytes_into(rem, warp_message)?;
+        // Bound the region to the declared size first. The previous check
+        // compared warp_message_size against warp_message_start.len(), which is
+        // "bytes to the end of the buffer" rather than "bytes this message
+        // used", so inflating the declared size to match appended bytes
+        // satisfied it. Slicing the region up front makes the declared size
+        // load-bearing, and requiring the parse to account for all of it closes
+        // the gap the old comparison left.
+        let (rem, warp_region) = take(warp_message_size as usize)(warp_message_start)?;
 
-        // Validate that we consumed exactly warp_message_size bytes
-        // Note: WarpMessage parsing consumes all bytes, so no remaining bytes are expected
-        let consumed_bytes = warp_message_start.len();
-        if consumed_bytes != warp_message_size as usize {
+        let warp_message = unsafe { &mut *addr_of_mut!((*out).warp_message).cast() };
+        let leftover = WarpMessage::from_bytes_into(warp_region, warp_message)?;
+        if !leftover.is_empty() {
             return Err(nom::Err::Error(ParserError::InvalidLength));
         }
 
@@ -62,7 +70,9 @@ impl<'b> FromBytes<'b> for SetL1ValidatorWeightTx<'b> {
             addr_of_mut!((*out).warp_message_size).write(warp_message_size);
         }
 
-        Ok(&[])
+        // Propagate the real remainder so Transaction::new_into's trailing-byte
+        // check has something to act on.
+        Ok(rem)
     }
 }
 
@@ -204,5 +214,52 @@ mod tests {
 
         let reduced = pages.iter().map(ReducedPage::from).collect::<Vec<_>>();
         insta::assert_debug_snapshot!(reduced);
+    }
+
+    /// The declared warp size is the only thing bounding that region, so a host
+    /// must not be able to append bytes and increment the size so the two agree
+    /// again: those bytes are covered by the signing hash and reach no screen.
+    fn warp_size_offset(data: &[u8]) -> usize {
+        // The warp message is the last field, so its size field is the u32 whose
+        // value runs exactly to the end of the transaction.
+        (0..data.len() - 4)
+            .find(|&off| {
+                let v = u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+                    as usize;
+                v > 40 && off + 4 + v == data.len()
+            })
+            .expect("warp_message_size field not located")
+    }
+
+    #[test]
+    fn set_l1_validator_weight_rejects_bytes_smuggled_into_warp_region() {
+        let data = SET_L1_VALIDATOR_WEIGHT_DATA;
+        let off = warp_size_offset(data);
+        let declared = u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+
+        // Baseline: untouched vector still parses.
+        assert!(SetL1ValidatorWeightTx::from_bytes(data).is_ok());
+
+        let mut tampered = Vec::from(data);
+        tampered.push(0x01);
+        tampered[off..off + 4].copy_from_slice(&(declared + 1).to_be_bytes());
+
+        assert!(
+            SetL1ValidatorWeightTx::from_bytes(&tampered).is_err(),
+            "a byte appended inside the warp region was accepted"
+        );
+    }
+
+    #[test]
+    fn set_l1_validator_weight_rejects_warp_size_larger_than_the_region() {
+        let data = SET_L1_VALIDATOR_WEIGHT_DATA;
+        let off = warp_size_offset(data);
+        let declared = u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+
+        // Declared size overruns the buffer without any bytes being added.
+        let mut tampered = Vec::from(data);
+        tampered[off..off + 4].copy_from_slice(&(declared + 1).to_be_bytes());
+
+        assert!(SetL1ValidatorWeightTx::from_bytes(&tampered).is_err());
     }
 }
