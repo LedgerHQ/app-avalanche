@@ -71,8 +71,11 @@ pub fn handle_ui_message(item: &[u8], out: &mut [u8], page: u8) -> Result<u8, Vi
         out[..chunk.len()].copy_from_slice(chunk);
         out[chunk.len()] = 0; //null terminate
 
-        let n_pages = item.len() / m_len;
-        Ok(1 + n_pages as u8)
+        // div_ceil, not 1 + floor: on an exact multiple the old form claimed one
+        // page more than chunks() yields, and the extra page surfaced as an
+        // error part-way through a review.
+        let n_pages = item.len().div_ceil(m_len);
+        Ok(n_pages.try_into().map_err(|_| ViewError::Unknown)?)
     } else {
         out[..item.len()].copy_from_slice(item);
         out[item.len()] = 0; //null terminate
