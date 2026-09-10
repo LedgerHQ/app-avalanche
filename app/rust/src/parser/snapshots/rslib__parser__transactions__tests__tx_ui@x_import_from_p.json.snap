@@ -9,4 +9,5 @@ input_file: app/src/parser/testvectors/x_import_from_p.json
     "Address": "fuji1cv6yz28qvqfgah34yw3y53su39p6kzzehw5pj3",
     "From ": "P Chain",
     "Fee(AVAX)": "0.246901233",
+    "Memo": "00010203",
 ]

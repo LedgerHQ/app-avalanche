@@ -29,7 +29,7 @@ use crate::{
     parser::{
         intstr_to_fpstr_inplace, nano_avax_to_fp_str, u32_to_str, AssetId, BaseTxFields,
         DisplayableItem, FromBytes, Header, ParserError, PvmOutput, SubnetAuth, SubnetId,
-        DELEGATION_FEE_DIGITS, PVM_TRANSFORM_SUBNET, U64_FORMATTED_SIZE
+        DELEGATION_FEE_DIGITS, PVM_TRANSFORM_SUBNET, U64_FORMATTED_SIZE,
     },
     utils::is_app_mode_expert,
 };
@@ -39,7 +39,7 @@ use crate::{
 #[cfg_attr(test, derive(Debug))]
 pub struct TransformSubnetTx<'b> {
     tx_header: Header<'b>,
-    base_tx: BaseTxFields<'b, PvmOutput<'b>>,
+    pub base_tx: BaseTxFields<'b, PvmOutput<'b>>,
 
     subnet_id: SubnetId<'b>,
     asset_id: AssetId<'b>,
@@ -300,7 +300,6 @@ impl DisplayableItem for TransformSubnetTx<'_> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
-
         let expert = is_app_mode_expert();
 
         match item_n {

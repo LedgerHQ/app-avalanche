@@ -12,4 +12,5 @@ input_file: app/src/parser/testvectors/x_operation.json
     "Payload: ": "0xe8bf99e698afe4bb80e4b988e4b88defbc8ce982a3e4b88de6...",
     "Owner: ": "fuji1cv6yz28qvqfgah34yw3y53su39p6kzzehw5pj3",
     "Fee(AVAX)": "0.123444444",
+    "Memo": "00010203",
 ]

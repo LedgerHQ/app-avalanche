@@ -25,7 +25,7 @@ use crate::parser::{
     TransferableInput, TransferableOutput, MAX_ADDRESS_ENCODED_LEN,
 };
 
-const MAX_MEMO_LEN: usize = 256;
+pub const MAX_MEMO_LEN: usize = 256;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, derive(Debug))]

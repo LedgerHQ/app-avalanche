@@ -23,13 +23,13 @@ use crate::{
     handlers::handle_ui_message,
     parser::{
         nano_avax_to_fp_str, AvmOutput, BaseExport, DisplayableItem, FromBytes, ParserError,
-        AVM_EXPORT_TX, U64_FORMATTED_SIZE
+        AVM_EXPORT_TX, U64_FORMATTED_SIZE,
     },
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, derive(Debug))]
-pub struct AvmExportTx<'b>(BaseExport<'b, AvmOutput<'b>>);
+pub struct AvmExportTx<'b>(pub BaseExport<'b, AvmOutput<'b>>);
 
 impl<'b> FromBytes<'b> for AvmExportTx<'b> {
     #[inline(never)]

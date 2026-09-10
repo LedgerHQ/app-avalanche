@@ -37,12 +37,17 @@ pub use tx_header::{Header, BLOCKCHAIN_ID_LEN};
 mod avm;
 mod pvm;
 
+use crate::checked_add;
+use crate::handlers::handle_ui_message;
+use crate::parser::transactions::base_tx_fields::MAX_MEMO_LEN;
 use crate::parser::{
     DisplayableItem, ExportTx as EvmExport, ImportTx as EvmImport, EVM_IMPORT_TX,
     PVM_BASE_TX_TRANSFER, PVM_EXPORT_TX, PVM_IMPORT_TX,
 };
+use crate::utils::hex_encode;
 pub use avm::{AvmExportTx, AvmImportTx, OperationTx};
 pub use pvm::{PvmExportTx, PvmImportTx};
+use zemu_sys::ViewError;
 
 #[cfg(feature = "create-asset")]
 pub use avm::CreateAssetTx;
@@ -442,8 +447,8 @@ impl<'b> Transaction<'b> {
     }
 }
 
-impl DisplayableItem for Transaction<'_> {
-    fn num_items(&self) -> Result<u8, zemu_sys::ViewError> {
+impl Transaction<'_> {
+    fn inner_num_items(&self) -> Result<u8, zemu_sys::ViewError> {
         match self {
             Self::XImport(tx) => tx.num_items(),
             Self::XExport(tx) => tx.num_items(),
@@ -491,7 +496,7 @@ impl DisplayableItem for Transaction<'_> {
         }
     }
 
-    fn render_item(
+    fn render_inner_item(
         &self,
         item_n: u8,
         title: &mut [u8],
@@ -543,6 +548,117 @@ impl DisplayableItem for Transaction<'_> {
             #[cfg(feature = "banff")]
             Self::SetAutoRenewedValidatorConfig(tx) => tx.render_item(item_n, title, message, page),
         }
+    }
+
+    /// The transaction's memo, when the type carries one.
+    ///
+    /// The field is parsed and covered by the signing hash but had no render
+    /// site anywhere in the crate, so up to 256 bytes were signed without ever
+    /// being shown. Coreth transactions have no memo field.
+    fn memo(&self) -> Option<&[u8]> {
+        match self {
+            Self::XImport(tx) => Some(tx.0.base_tx.memo),
+            Self::XExport(tx) => Some(tx.0.base_tx.memo),
+            Self::XOperation(tx) => Some(tx.base_tx.memo),
+            Self::PImport(tx) => Some(tx.0.base_tx.memo),
+            Self::PExport(tx) => Some(tx.0.base_tx.memo),
+            Self::CImport(_) => None,
+            Self::CExport(_) => None,
+            Self::Transfer(tx) => Some(tx.base.memo),
+            Self::PBase(tx) => Some(tx.base.memo),
+            #[cfg(feature = "create-asset")]
+            Self::XAsset(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "add-validator")]
+            Self::Validator(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "add-subnet-validator")]
+            Self::SubnetValidator(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "add-delegator")]
+            Self::Delegator(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "create-chain")]
+            Self::CreateChain(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "create-subnet")]
+            Self::CreateSubnet(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::RemoveSubnetValidator(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::TransformSubnet(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::PermissionlessValidator(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::PermissionlessDelegator(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::ConvertSubnetToL1(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::IncreaseL1ValidatorBalance(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::DisableL1Validator(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::SetL1ValidatorWeight(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::RegisterL1Validator(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::AutoRenewedValidator(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::SetAutoRenewedValidatorConfig(tx) => Some(tx.base_tx.memo),
+        }
+    }
+
+    fn memo_items(&self) -> u8 {
+        match self.memo() {
+            Some(memo) if !memo.is_empty() => 1,
+            _ => 0,
+        }
+    }
+
+    fn render_memo(
+        &self,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, zemu_sys::ViewError> {
+        use bolos::{pic_str, PIC};
+
+        let memo = self.memo().ok_or(ViewError::NoData)?;
+
+        let label = pic_str!(b"Memo");
+        title[..label.len()].copy_from_slice(label);
+
+        // Memos are arbitrary host bytes. Printable ASCII goes through as text;
+        // anything else is hex so control characters and bidi overrides cannot
+        // reach the screen.
+        if memo.iter().all(|c| (0x20..0x7f).contains(c)) {
+            handle_ui_message(memo, message, page)
+        } else {
+            let mut hex = [0; MAX_MEMO_LEN * 2];
+            let len = hex_encode(memo, &mut hex[..]).map_err(|_| ViewError::Unknown)?;
+            handle_ui_message(&hex[..len], message, page)
+        }
+    }
+}
+
+impl DisplayableItem for Transaction<'_> {
+    fn num_items(&self) -> Result<u8, zemu_sys::ViewError> {
+        // The memo is a transaction-level field, so it is counted here rather
+        // than in each of the twenty-two types that carry BaseTxFields.
+        checked_add!(
+            ViewError::Unknown,
+            self.inner_num_items()?,
+            self.memo_items()
+        )
+    }
+
+    fn render_item(
+        &self,
+        item_n: u8,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, zemu_sys::ViewError> {
+        let inner = self.inner_num_items()?;
+        if self.memo_items() == 1 && item_n == inner {
+            return self.render_memo(title, message, page);
+        }
+        self.render_inner_item(item_n, title, message, page)
     }
 }
 
