@@ -163,7 +163,8 @@ impl DisplayableItem for ConvertSubnetToL1Tx<'_> {
         checked_add!(
             ViewError::Unknown,
             BASE_FIELDS_LEN,
-            (self.num_validators() * validator_items() as usize) as u8,
+            u8::try_from(self.num_validators() * validator_items() as usize)
+                .map_err(|_| ViewError::Unknown)?,
             self.base_tx.base_outputs_num_items()?
         )
     }
@@ -250,8 +251,10 @@ impl DisplayableItem for ConvertSubnetToL1Tx<'_> {
                 }
             }
             x @ 5.. => {
-                let output_n =
-                    x - BASE_FIELDS_LEN - (self.num_validators() * validator_items() as usize) as u8;
+                let validator_screens =
+                    u8::try_from(self.num_validators() * validator_items() as usize)
+                        .map_err(|_| ViewError::Unknown)?;
+                let output_n = x - BASE_FIELDS_LEN - validator_screens;
                 let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
                 self.base_tx
                     .render_base_output_with_hrp(hrp, output_n, title, message, page)
