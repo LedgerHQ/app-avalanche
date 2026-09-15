@@ -37,10 +37,10 @@ use crate::constants::{
 ///   ([`BIP32_PATH_ROOT_COIN_ETH`]) — the same root used by the embedded ETH
 ///   handler for C-chain EVM transactions.
 ///
-/// Both prefixes are legitimate at the root level; which one is required
-/// depends on the parsed transaction type and is enforced at the call site
-/// (see `signing.rs`). The helper here keeps the structural guarantees that
-/// are always true regardless of tx type:
+/// Both prefixes are accepted at the root level. Nothing ties the coin type to
+/// the parsed transaction type: no call site checks that X/P-chain
+/// transactions use 9000' or that CoreEth ones use 60'. The helper here keeps
+/// only the structural guarantees that hold regardless of tx type:
 ///
 /// - depth == [`BIP32_PATH_PREFIX_DEPTH`] (3 components)
 /// - component 0 equals [`BIP32_PATH_ROOT_0`] (44')
