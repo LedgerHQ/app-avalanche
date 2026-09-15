@@ -214,9 +214,9 @@ impl<'b> FromBytes<'b> for Operation<'b> {
 }
 
 impl Operation<'_> {
-    /// Same as the DisplayableItem rendering, but encodes owner addresses for
-    /// `hrp`. Only the NFT operations carry an owner address of their own; the
-    /// SECP mint operation renders through paths that already know the network.
+    /// Same as the DisplayableItem rendering, but encodes every address it
+    /// shows -- NFT owners, and the SECP mint operation's new owners and mint
+    /// authority -- for `hrp`.
     pub fn render_item_with_hrp(
         &self,
         hrp: &str,
@@ -243,7 +243,7 @@ impl Operation<'_> {
             Operation::NFTTransfer(op) => {
                 op.render_item_with_hrp(hrp, item_n, title, message, page)
             }
-            Operation::SECPMint(op) => op.render_item(item_n, title, message, page),
+            Operation::SECPMint(op) => op.render_item_with_hrp(hrp, item_n, title, message, page),
         }
     }
 }

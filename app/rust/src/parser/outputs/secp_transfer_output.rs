@@ -105,9 +105,25 @@ impl DisplayableItem for SECPTransferOutput<'_> {
         checked_add!(ViewError::Unknown, 1u8, self.addresses.len() as u8)
     }
 
-    #[inline(never)]
     fn render_item(
         &self,
+        item_n: u8,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
+        self.render_item_with_hrp("", item_n, title, message, page)
+    }
+}
+
+impl SECPTransferOutput<'_> {
+    /// Same as the DisplayableItem rendering, but encodes addresses for `hrp`.
+    /// The empty HRP that render_item uses produces a string no wallet
+    /// accepts, so any screen that knows the network should come through here.
+    #[inline(never)]
+    pub fn render_item_with_hrp(
+        &self,
+        hrp: &str,
         item_n: u8,
         title: &mut [u8],
         message: &mut [u8],
@@ -138,7 +154,7 @@ impl DisplayableItem for SECPTransferOutput<'_> {
             x @ 1.. if x >= addr_item_n => {
                 let idx = x - addr_item_n;
                 let addr = self.get_address_at(idx as usize).ok_or(ViewError::NoData)?;
-                addr.render_item(0, title, message, page)
+                addr.render_with_hrp(hrp, title, message, page)
             }
             _ => Err(ViewError::NoData),
         }
