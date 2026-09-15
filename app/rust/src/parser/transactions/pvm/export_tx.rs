@@ -71,9 +71,13 @@ impl<'b> FromBytes<'b> for PvmExportTx<'b> {
 
 impl DisplayableItem for PvmExportTx<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
+        // description, exported outputs, base (change) outputs and fee.
+        // The base outputs were previously left out of the count entirely, so
+        // where the change went was never on screen.
         let outputs = self.0.num_outputs_items()?;
+        let base_outputs = self.0.base_tx.base_outputs_num_items()?;
 
-        checked_add!(ViewError::Unknown, 2u8, outputs)
+        checked_add!(ViewError::Unknown, 2u8, outputs, base_outputs)
     }
 
     fn render_item(
@@ -91,11 +95,25 @@ impl DisplayableItem for PvmExportTx<'_> {
         }
 
         let outputs_num_items = self.0.num_outputs_items()?;
+        let end_base_outputs = outputs_num_items
+            .checked_add(self.0.base_tx.base_outputs_num_items()?)
+            .ok_or(ViewError::Unknown)?;
         let new_item_n = item_n - 1;
 
         match new_item_n {
             x @ 0.. if x < outputs_num_items => self.0.render_outputs(x, title, message, page),
-            x if x == outputs_num_items => {
+            // render base (change) outputs
+            x if (outputs_num_items..end_base_outputs).contains(&x) => {
+                let hrp = self.0.chain_hrp().map_err(|_| ViewError::Unknown)?;
+                self.0.base_tx.render_base_output_with_hrp(
+                    hrp,
+                    x - outputs_num_items,
+                    title,
+                    message,
+                    page,
+                )
+            }
+            x if x == end_base_outputs => {
                 let title_content = pic_str!(b"Fee(AVAX)");
                 title[..title_content.len()].copy_from_slice(title_content);
                 let mut buffer = [0; U64_FORMATTED_SIZE + 2];

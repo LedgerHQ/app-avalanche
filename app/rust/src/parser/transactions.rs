@@ -819,11 +819,8 @@ mod tests {
         // No wildcard: a new transaction type must be added here explicitly.
         match tx {
             Transaction::XImport(tx) => collect(&tx.0.base_tx, hrp, &mut out),
-            // BaseExport renders only the exported outputs; its base (change)
-            // outputs count toward the fee but have no screen. Same class as
-            // the types fixed here, but it changes every export review, so it
-            // is left for a separate change rather than asserted here.
-            Transaction::XExport(_) | Transaction::PExport(_) => {}
+            Transaction::XExport(tx) => collect(&tx.0.base_tx, hrp, &mut out),
+            Transaction::PExport(tx) => collect(&tx.0.base_tx, hrp, &mut out),
             Transaction::XOperation(tx) => collect(&tx.base_tx, hrp, &mut out),
             Transaction::PBase(tx) => collect(&tx.base, hrp, &mut out),
             Transaction::PImport(tx) => collect(&tx.0.base_tx, hrp, &mut out),
