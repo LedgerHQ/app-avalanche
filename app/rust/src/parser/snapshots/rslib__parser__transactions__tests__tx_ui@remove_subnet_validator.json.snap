@@ -1,0 +1,12 @@
+---
+source: src/parser/transactions.rs
+assertion_line: 787
+expression: reduced
+input_file: src/parser/testvectors/remove_subnet_validator.json
+---
+[
+    "RemoveSubnetValid": "Transaction",
+    "Validator": "NodeID-2ZbTY9GatRTrfinAoYiYLcf6CvrPAUYgo",
+    "SubnetID": "SkB92YpWm4UpburLz9tEKZw2i67H3FF6YkjaU4BkFUDTG9Xm",
+    "Fee(AVAX)": "0.001",
+]

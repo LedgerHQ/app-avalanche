@@ -1,10 +1,15 @@
 ---
 source: src/parser/transactions/pvm/banff/disable_l1_validator.rs
-assertion_line: 187
+assertion_line: 209
 expression: reduced
 ---
 [
     "DisableL1Val": "transaction",
     "Validator": "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "Amount": "0.000000001 AVAX to ",
+    "Funds locked": "0.000000001 AVAX until 1972-10-11 12:25:21 UTC",
+    "Amount": "0.000000001 AVAX to ",
+    "Address": "fuji1g32kvaugnx4tk3z4vemc3xd2hdz92enhfvw32u",
+    "Funds locked": "0.000000001 AVAX until 1997-10-11 04:13:30 UTC",
     "Fee(AVAX)": "1152921506.606846974",
 ]

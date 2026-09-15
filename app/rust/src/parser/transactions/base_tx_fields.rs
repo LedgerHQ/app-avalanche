@@ -21,8 +21,8 @@ use nom::{bytes::complete::take, number::complete::be_u32};
 use zemu_sys::ViewError;
 
 use crate::parser::{
-    DisplayableItem, FromBytes, ObjectList, Output, OutputIdx, ParserError, PvmOutput,
-    TransferableInput, TransferableOutput, MAX_ADDRESS_ENCODED_LEN,
+    DisplayableItem, FromBytes, ObjectList, Output, OutputIdx, ParserError, TransferableInput,
+    TransferableOutput, MAX_ADDRESS_ENCODED_LEN,
 };
 
 pub const MAX_MEMO_LEN: usize = 256;
@@ -236,13 +236,18 @@ where
     }
 }
 
-impl<'b> BaseTxFields<'b, PvmOutput<'b>> {
+impl<'b, O> BaseTxFields<'b, O>
+where
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+{
     /// Render one item of one base output, encoding addresses with `hrp`.
     ///
-    /// Several PVM transactions carry base outputs that their own renderers
-    /// never showed. They all need the same three-part shape -- amount line,
-    /// one screen per address, then the locked-funds line -- so it lives here
-    /// rather than being copied into each of them.
+    /// Several transactions carry base outputs that their own renderers
+    /// never showed. They all need the same shape -- amount line, one screen
+    /// per address, then the locked-funds line where the output type has one
+    /// -- so it lives here rather than being copied into each of them. It is
+    /// generic over the output type because the X-chain CreateAsset needs it
+    /// as much as the P-chain types do.
     pub fn render_base_output_with_hrp(
         &'b self,
         hrp: &str,
@@ -255,18 +260,21 @@ impl<'b> BaseTxFields<'b, PvmOutput<'b>> {
             .base_output_with_item(item_n)
             .map_err(|_| ViewError::NoData)?;
 
-        // Only secp_transfer outputs are supported, as in import/export.
-        let _ = obj.output.secp_transfer().ok_or(ViewError::NoData)?;
+        let inner: &Output<'_> = &obj.output;
 
-        let num_inner_items = obj.output.num_inner_items()?;
+        // Only secp_transfer outputs are supported, as in import/export.
+        let _ = inner.secp_transfer().ok_or(ViewError::NoData)?;
+
+        // Items of the inner output alone. A locked PvmOutput counts one more
+        // (the locked-funds line), which its own render_item draws below.
+        let num_inner_items = inner.num_items()?;
 
         match obj_item_n {
             0 => obj.render_item(obj_item_n, title, message, page),
             x @ 1.. if x < num_inner_items => {
                 let address_idx = x - 1;
-                let address = obj
-                    .output
-                    .get_address_at(address_idx as usize)
+                let address = inner
+                    .get_address(address_idx as usize)
                     .ok_or(ViewError::NoData)?;
 
                 let t = pic_str!(b"Address");

@@ -314,6 +314,23 @@ impl<'b> Transaction<'b> {
             Self::RemoveSubnetValidator(tx) => tx.disable_output_if(address),
             #[cfg(feature = "banff")]
             Self::ConvertSubnetToL1(tx) => tx.disable_output_if(address),
+            // And these seven, which had the same gap: base outputs that
+            // were signed and never shown, and no arm here.
+            #[cfg(feature = "create-asset")]
+            Self::XAsset(tx) => tx.disable_output_if(address),
+            #[cfg(feature = "banff")]
+            Self::TransformSubnet(tx) => tx.disable_output_if(address),
+            #[cfg(feature = "banff")]
+            Self::RegisterL1Validator(tx) => tx.disable_output_if(address),
+            #[cfg(feature = "banff")]
+            Self::SetL1ValidatorWeight(tx) => tx.disable_output_if(address),
+            #[cfg(feature = "banff")]
+            Self::DisableL1Validator(tx) => tx.disable_output_if(address),
+            #[cfg(feature = "banff")]
+            Self::IncreaseL1ValidatorBalance(tx) => tx.disable_output_if(address),
+            #[cfg(feature = "banff")]
+            Self::SetAutoRenewedValidatorConfig(tx) => tx.disable_output_if(address),
+            // CImport is the only type left without an arm; see above.
             _ => {}
         }
     }
@@ -772,5 +789,134 @@ mod tests {
 
             unsafe { with_leaked(input, test) };
         });
+    }
+
+    /// Every address of every base output `tx` signs, encoded with `hrp`.
+    /// Coreth transactions carry no BaseTxFields.
+    #[cfg(feature = "full")]
+    fn base_output_addresses(tx: &Transaction<'_>, hrp: &str) -> Vec<String> {
+        use crate::parser::{BaseTxFields, FromBytes, Output, MAX_ADDRESS_ENCODED_LEN};
+        use core::ops::Deref;
+
+        fn collect<'b, O>(base: &BaseTxFields<'b, O>, hrp: &str, out: &mut Vec<String>)
+        where
+            O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+        {
+            base.outputs.iterate_with(|o| {
+                let inner: &Output<'_> = &o.output;
+                for idx in 0..inner.num_addresses() {
+                    let address = inner.get_address(idx).expect("address in range");
+                    let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
+                    let len = address
+                        .encode_into(hrp, &mut encoded[..])
+                        .expect("encodable address");
+                    out.push(String::from_utf8(encoded[..len].to_vec()).expect("bech32 is ascii"));
+                }
+            });
+        }
+
+        let mut out = Vec::new();
+        // No wildcard: a new transaction type must be added here explicitly.
+        match tx {
+            Transaction::XImport(tx) => collect(&tx.0.base_tx, hrp, &mut out),
+            // BaseExport renders only the exported outputs; its base (change)
+            // outputs count toward the fee but have no screen. Same class as
+            // the types fixed here, but it changes every export review, so it
+            // is left for a separate change rather than asserted here.
+            Transaction::XExport(_) | Transaction::PExport(_) => {}
+            Transaction::XOperation(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::PBase(tx) => collect(&tx.base, hrp, &mut out),
+            Transaction::PImport(tx) => collect(&tx.0.base_tx, hrp, &mut out),
+            Transaction::CImport(_) | Transaction::CExport(_) => {}
+            Transaction::Transfer(tx) => collect(&tx.base, hrp, &mut out),
+            Transaction::XAsset(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::Validator(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::Delegator(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::CreateChain(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::CreateSubnet(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::SubnetValidator(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::RemoveSubnetValidator(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::TransformSubnet(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::PermissionlessValidator(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::PermissionlessDelegator(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::ConvertSubnetToL1(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::RegisterL1Validator(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::SetL1ValidatorWeight(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::DisableL1Validator(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::IncreaseL1ValidatorBalance(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::AutoRenewedValidator(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::SetAutoRenewedValidatorConfig(tx) => collect(&tx.base_tx, hrp, &mut out),
+        }
+        out
+    }
+
+    /// A base output the device signs must be on screen. The fee is
+    /// sum(inputs) - sum(outputs), so it only depends on amounts: an output
+    /// whose address is never rendered can be redirected with nothing on the
+    /// review to show for it.
+    ///
+    /// Walks every vector, renders every page, and checks each base-output
+    /// address appears -- with no change filter, and with one that matches
+    /// none of the outputs (so nothing may be hidden).
+    #[test]
+    #[cfg(feature = "full")]
+    #[cfg_attr(miri, ignore)]
+    fn every_base_output_is_rendered() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/parser/testvectors");
+        let mut paths = std::fs::read_dir(&dir)
+            .expect("testvectors dir")
+            .map(|entry| entry.expect("dir entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .collect::<Vec<_>>();
+        paths.sort();
+        assert!(!paths.is_empty(), "no vectors found in {:?}", dir);
+
+        for path in paths {
+            let file = std::fs::File::open(&path).expect("open vector");
+            let data: Vec<u8> = serde_json::from_reader(file).expect("vector is a byte array");
+
+            for change_filter in [None, Some([0xa5u8; 20])] {
+                let mut tx = Transaction::new(&data)
+                    .unwrap_or_else(|e| panic!("{:?} does not parse: {:?}", path, e));
+                if let Some(change) = change_filter {
+                    tx.disable_output_if(&change);
+                }
+
+                // codec (2 bytes) and type id (4 bytes), then the network id
+                let network_id = u32::from_be_bytes([data[6], data[7], data[8], data[9]]);
+                let hrp = crate::parser::NetworkId::try_from(network_id)
+                    .expect("valid network id")
+                    .hrp();
+
+                let mut screens = Vec::<String>::new();
+                let items = DisplayableItem::num_items(&tx).expect("num_items");
+                for item in 0..items {
+                    let mut title = [0u8; 18];
+                    let mut message = [0u8; 1024];
+                    let pages = DisplayableItem::render_item(&tx, item, &mut title, &mut message, 0)
+                        .unwrap_or_else(|e| panic!("{:?}: item {} failed: {:?}", path, item, e));
+
+                    let mut text = String::new();
+                    for page in 0..pages {
+                        message.fill(0);
+                        DisplayableItem::render_item(&tx, item, &mut title, &mut message, page)
+                            .expect("page renders");
+                        let end = message.iter().position(|&b| b == 0).unwrap_or(message.len());
+                        text.push_str(core::str::from_utf8(&message[..end]).expect("ascii"));
+                    }
+                    screens.push(text);
+                }
+
+                for address in base_output_addresses(&tx, hrp) {
+                    assert!(
+                        screens.contains(&address),
+                        "{:?}: base output address {} is signed but never shown (change filter: {:?})",
+                        path,
+                        address,
+                        change_filter
+                    );
+                }
+            }
+        }
     }
 }

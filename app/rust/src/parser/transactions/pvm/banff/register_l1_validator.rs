@@ -1,3 +1,4 @@
+use crate::checked_add;
 use crate::parser::{nano_avax_to_fp_str, WarpMessage, ADDRESS_LEN};
 use crate::utils::hex_encode;
 use crate::{
@@ -86,6 +87,10 @@ impl<'b> FromBytes<'b> for RegisterL1ValidatorTx<'b> {
 }
 
 impl<'b> RegisterL1ValidatorTx<'b> {
+    pub fn disable_output_if(&mut self, address: &[u8]) {
+        self.base_tx.disable_output_if(address);
+    }
+
     // Info at https://github.com/ava-labs/avalanchejs/blob/master/src/utils/getBurnedAmountByTx.ts
     fn fee(&'b self) -> Result<u64, ParserError> {
         let sum_inputs = self.base_tx.sum_inputs_amount()?;
@@ -106,13 +111,21 @@ impl<'b> RegisterL1ValidatorTx<'b> {
 
 impl DisplayableItem for RegisterL1ValidatorTx<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        // tx_info, node_id, weight, balance, fee, remaining_balance_owner, disable_owner
+        // tx_info, node_id, weight, balance, base outputs, fee,
+        // remaining_balance_owner, disable_owner.
+        // The base outputs were previously left out of the count entirely, so
+        // where the transaction's change went was never on screen.
         if let crate::parser::AddressedCallPayload::RegisterL1Validator(ref msg) =
             self.warp_message.payload.payload
         {
             let n_addresses =
                 msg.remaining_balance_owner.addresses.len() + msg.disable_owner.addresses.len();
-            Ok(FIXED_FIELDS_LEN + n_addresses as u8)
+            checked_add!(
+                ViewError::Unknown,
+                FIXED_FIELDS_LEN,
+                self.base_tx.base_outputs_num_items()?,
+                n_addresses as u8
+            )
         } else {
             Err(ViewError::NoData)
         }
@@ -137,6 +150,18 @@ impl DisplayableItem for RegisterL1ValidatorTx<'_> {
             let n_remain_addresses = msg.remaining_balance_owner.addresses.len();
             let n_disable_addresses = msg.disable_owner.addresses.len();
             let prefix = pic_str!(b"0x"!);
+
+            // The base outputs sit between the balance and the fee, so the
+            // owner addresses no longer start at a fixed index.
+            const START_OUTPUTS: u8 = 4;
+            let output_items = self.base_tx.base_outputs_num_items()?;
+            let end_outputs = START_OUTPUTS
+                .checked_add(output_items)
+                .ok_or(ViewError::Unknown)?;
+            let start_remain = end_outputs as usize + 1;
+            let start_disable = start_remain + n_remain_addresses;
+            let end_disable = start_disable + n_disable_addresses;
+
             match item_n {
                 0 => {
                     let label = pic_str!(b"RegisterL1Val");
@@ -161,7 +186,18 @@ impl DisplayableItem for RegisterL1ValidatorTx<'_> {
 
                     handle_ui_message(balance_buff, message, page)
                 }
-                4 => {
+                // render base outputs
+                x if (START_OUTPUTS..end_outputs).contains(&x) => {
+                    let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+                    self.base_tx.render_base_output_with_hrp(
+                        hrp,
+                        x - START_OUTPUTS,
+                        title,
+                        message,
+                        page,
+                    )
+                }
+                x if x == end_outputs => {
                     let label = pic_str!(b"Fee(AVAX)");
                     title[..label.len()].copy_from_slice(label);
 
@@ -171,7 +207,7 @@ impl DisplayableItem for RegisterL1ValidatorTx<'_> {
 
                     handle_ui_message(fee_buff, message, page)
                 }
-                x if x >= FIXED_FIELDS_LEN && x < (FIXED_FIELDS_LEN + n_remain_addresses as u8) => {
+                x if (start_remain..start_disable).contains(&(x as usize)) => {
                     let label = pic_str!(b"Rem Addr");
                     title[..label.len()].copy_from_slice(label);
 
@@ -180,18 +216,14 @@ impl DisplayableItem for RegisterL1ValidatorTx<'_> {
                     out[..prefix.len()].copy_from_slice(&prefix[..]);
 
                     sz += hex_encode(
-                        msg.remaining_balance_owner.addresses[x as usize - 5],
+                        msg.remaining_balance_owner.addresses[x as usize - start_remain],
                         &mut out[prefix.len()..],
                     )
                     .map_err(|_| ViewError::Unknown)?;
 
                     handle_ui_message(&out[..sz], message, page)
                 }
-                x if x >= (FIXED_FIELDS_LEN + n_remain_addresses as u8)
-                    && x < (FIXED_FIELDS_LEN
-                        + n_remain_addresses as u8
-                        + n_disable_addresses as u8) =>
-                {
+                x if (start_disable..end_disable).contains(&(x as usize)) => {
                     let label = pic_str!(b"Disabler");
                     title[..label.len()].copy_from_slice(label);
 
@@ -200,7 +232,7 @@ impl DisplayableItem for RegisterL1ValidatorTx<'_> {
                     out[..prefix.len()].copy_from_slice(&prefix[..]);
 
                     sz += hex_encode(
-                        msg.disable_owner.addresses[x as usize - 5 - n_remain_addresses],
+                        msg.disable_owner.addresses[x as usize - start_disable],
                         &mut out[prefix.len()..],
                     )
                     .map_err(|_| ViewError::Unknown)?;

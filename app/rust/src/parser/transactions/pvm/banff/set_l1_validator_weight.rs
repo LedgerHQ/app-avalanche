@@ -1,3 +1,4 @@
+use crate::checked_add;
 use crate::utils::hex_encode;
 use crate::{
     handlers::handle_ui_message,
@@ -77,6 +78,10 @@ impl<'b> FromBytes<'b> for SetL1ValidatorWeightTx<'b> {
 }
 
 impl<'b> SetL1ValidatorWeightTx<'b> {
+    pub fn disable_output_if(&mut self, address: &[u8]) {
+        self.base_tx.disable_output_if(address);
+    }
+
     fn fee(&'b self) -> Result<u64, ParserError> {
         let base_outputs = self.base_tx.sum_outputs_amount()?;
 
@@ -91,8 +96,14 @@ impl<'b> SetL1ValidatorWeightTx<'b> {
 
 impl DisplayableItem for SetL1ValidatorWeightTx<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        // tx_info, validation_id, nonce, weight, fee
-        Ok(FIXED_FIELDS_LEN)
+        // tx_info, validation_id, nonce, weight, base outputs and fee.
+        // The base outputs were previously left out of the count entirely, so
+        // where the transaction's change went was never on screen.
+        checked_add!(
+            ViewError::Unknown,
+            FIXED_FIELDS_LEN,
+            self.base_tx.base_outputs_num_items()?
+        )
     }
 
     fn render_item(
@@ -107,6 +118,12 @@ impl DisplayableItem for SetL1ValidatorWeightTx<'_> {
 
         let mut itoa_buffer = Buffer::new();
         let mut buffer = [0; U64_FORMATTED_SIZE + 2];
+
+        const START_OUTPUTS: u8 = 4;
+        let output_items = self.base_tx.base_outputs_num_items()?;
+        let end_outputs = START_OUTPUTS
+            .checked_add(output_items)
+            .ok_or(ViewError::Unknown)?;
 
         if let AddressedCallPayload::SetL1ValidatorWeight(ref msg) =
             self.warp_message.payload.payload
@@ -145,7 +162,18 @@ impl DisplayableItem for SetL1ValidatorWeightTx<'_> {
                     let buffer = itoa_buffer.format(msg.weight);
                     handle_ui_message(buffer.as_bytes(), message, page)
                 }
-                4 => {
+                // render base outputs
+                x if (START_OUTPUTS..end_outputs).contains(&x) => {
+                    let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+                    self.base_tx.render_base_output_with_hrp(
+                        hrp,
+                        x - START_OUTPUTS,
+                        title,
+                        message,
+                        page,
+                    )
+                }
+                x if x == end_outputs => {
                     let label = pic_str!(b"Fee(AVAX)");
                     title[..label.len()].copy_from_slice(label);
 
