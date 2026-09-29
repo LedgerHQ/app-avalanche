@@ -440,17 +440,27 @@ impl<'b> Transaction<'b> {
     /// of the transaction: base inputs and outputs, and the imported, exported
     /// and stake lists where the type has them. NFT and mint outputs carry no
     /// amount and are skipped.
-    fn visit_flows(&self, f: &mut dyn FnMut(bool, [u8; 32], u64)) {
-        fn ins(list: &ObjectList<'_, TransferableInput<'_>>, f: &mut dyn FnMut(bool, [u8; 32], u64)) {
+    ///
+    /// `f` is generic rather than a `&mut dyn FnMut`: a trait object's
+    /// vtable holds absolute link-time function addresses that nothing
+    /// relocates (ROPI only makes code-relative accesses position
+    /// independent), so calling through it on the device jumps outside the
+    /// app and crashes it.
+    fn visit_flows<F: FnMut(bool, [u8; 32], u64)>(&self, f: &mut F) {
+        fn ins<F: FnMut(bool, [u8; 32], u64)>(
+            list: &ObjectList<'_, TransferableInput<'_>>,
+            f: &mut F,
+        ) {
             list.iterate_with(|i| {
                 if let Some(amount) = i.amount() {
                     f(true, *i.asset_id().id(), amount)
                 }
             });
         }
-        fn outs<'b, O>(list: &ObjectList<'b, TransferableOutput<'b, O>>, f: &mut dyn FnMut(bool, [u8; 32], u64))
+        fn outs<'b, O, F>(list: &ObjectList<'b, TransferableOutput<'b, O>>, f: &mut F)
         where
             O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
+            F: FnMut(bool, [u8; 32], u64),
         {
             list.iterate_with(|o| {
                 if let Some(amount) = o.amount() {
@@ -458,9 +468,10 @@ impl<'b> Transaction<'b> {
                 }
             });
         }
-        fn base<'b, O>(base: &BaseTxFields<'b, O>, f: &mut dyn FnMut(bool, [u8; 32], u64))
+        fn base<'b, O, F>(base: &BaseTxFields<'b, O>, f: &mut F)
         where
             O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
+            F: FnMut(bool, [u8; 32], u64),
         {
             ins(&base.inputs, f);
             outs(&base.outputs, f);
