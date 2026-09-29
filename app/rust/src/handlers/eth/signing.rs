@@ -263,8 +263,7 @@ impl Sign {
             hash: unsigned_hash,
             is_typed: tx.is_typed_tx(),
             chain_id: chain_id_to_array(tx.chain_id()),
-            tx,
-            blind: false,
+            tx: Some(tx),
         };
 
         crate::show_ui!(unsafe { ui.show(flags) })
@@ -307,8 +306,7 @@ impl Sign {
             hash: unsigned_hash,
             is_typed: tx.is_typed_tx(),
             chain_id: chain_id_to_array(tx.chain_id()),
-            tx,
-            blind: false,
+            tx: Some(tx),
         });
 
         unsafe {
@@ -410,12 +408,6 @@ impl Sign {
             .finalize()
             .map_err(|_| ParserError::UnexpectedError)?;
 
-        // Create a minimal SignUI with the pre-computed hash for blind signing
-        // We need a dummy transaction object but it won't be displayed in blind signing mode
-        // In blind signing, we only show the hash, not transaction details
-        // So we can safely use a zeroed transaction structure as placeholder
-        let tx: EthTransaction<'static> = unsafe { core::mem::zeroed() };
-
         // Retrieve stored transaction metadata for V calculation
         let is_typed = unsafe {
             let stored_is_typed =
@@ -444,8 +436,7 @@ impl Sign {
             hash,     // Use the pre-computed hash from streaming
             is_typed, // Transaction type from first packet
             chain_id, // Chain ID from first packet (for correct V calculation)
-            tx,       // Dummy transaction (won't be displayed in blind signing)
-            blind: true,
+            tx: None, // Never parsed: reviewed as its hash only
         });
 
         // Store the UI for later signing
@@ -753,16 +744,22 @@ impl ApduHandler for Sign {
 
 pub(crate) struct SignUI {
     pub(crate) hash: [u8; Sign::SIGN_HASH_SIZE],
-    pub(crate) tx: EthTransaction<'static>,
+    // The parsed transaction, or None for a streamed one, which is never
+    // parsed and is reviewed as its hash with the blind-signing UI
+    pub(crate) tx: Option<EthTransaction<'static>>,
     pub(crate) is_typed: bool, // For correct V calculation in blind signing
     pub(crate) chain_id: Option<[u8; 8]>, // Store raw chain ID bytes for V calculation (fixed array)
-    // Streamed transaction: reviewed as its hash, with the blind-signing UI
-    pub(crate) blind: bool,
+}
+
+impl SignUI {
+    fn is_blind(&self) -> bool {
+        self.tx.is_none()
+    }
 }
 
 impl Viewable for SignUI {
     fn num_items(&mut self) -> Result<u8, ViewError> {
-        self.tx.num_items()
+        self.tx.as_ref().ok_or(ViewError::NoData)?.num_items()
     }
 
     #[inline(never)]
@@ -773,7 +770,10 @@ impl Viewable for SignUI {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
-        self.tx.render_item(item_n, title, message, page)
+        self.tx
+            .as_ref()
+            .ok_or(ViewError::NoData)?
+            .render_item(item_n, title, message, page)
     }
 
     fn accept(&mut self, out: &mut [u8]) -> (usize, u16) {
@@ -836,17 +836,14 @@ impl SignUI {
                     }
                     &v[start..]
                 })
-                .unwrap_or_else(|| self.tx.chain_id());
+                .or_else(|| self.tx.as_ref().map(|tx| tx.chain_id()))
+                .unwrap_or_default();
 
             if chain_id.is_empty() {
-                // according to app-ethereum this is the legacy non eip155 conformant
-                // so V should be made before EIP155 which had
-                // 27 + {0, 1}
-                // 27, decided by the parity of Y
-                // see https://bitcoin.stackexchange.com/a/112489
-                //     https://ethereum.stackexchange.com/a/113505
-                //     https://eips.ethereum.org/EIPS/eip-155
-                out[tx] = 27 + flags.contains(ECCInfo::ParityOdd) as u8;
+                // A legacy transaction with no chain ID is pre-EIP-155 and
+                // valid on every EVM chain. Both parsers refuse it, so this
+                // is never reached; never sign one (V = 27/28) regardless.
+                return (0, Error::DataInvalid as _);
             } else {
                 // app-ethereum reads the first 4 bytes then cast it to an u8
                 // this is not good but it relies on hw-eth-app lib from ledger
@@ -939,7 +936,7 @@ pub fn cleanup_globals() -> Result<(), Error> {
 /// so they cannot disagree with it or outlive it.
 unsafe fn blind_review() -> Option<&'static SignUI> {
     match crate::lock_mut!(ETH_UI).lock(EthAccessors::Tx) {
-        Some(EthUi::Tx(ui)) if ui.blind => Some(ui),
+        Some(EthUi::Tx(ui)) if ui.is_blind() => Some(ui),
         _ => None,
     }
 }
@@ -1536,6 +1533,42 @@ mod session_tests {
 
         assert_eq!(send_tx(&padded), Ok(true));
         assert_eq!(ui_hash(), keccak(&tx));
+        reset();
+    }
+
+    // A streamed transaction is stored without a parsed transaction, so its
+    // review can only be rendered as a hash.
+    #[test]
+    #[file_serial(path)]
+    fn streamed_review_holds_no_transaction() {
+        reset();
+        assert_eq!(send_tx(&eip1559_big(AVAX_C_CHAIN_MAINNET_ID)), Ok(true));
+
+        let ui = unsafe { crate::lock_mut!(ETH_UI).lock(EthAccessors::Tx) };
+        let ui = ui.as_mut().expect("no review stored");
+        assert!(ui.num_items().is_err());
+        let (mut title, mut msg) = ([0u8; 64], [0u8; 256]);
+        assert!(ui.render_item(0, &mut title, &mut msg, 0).is_err());
+        reset();
+    }
+
+    // A review with no chain ID for a legacy transaction is never signed,
+    // whatever built it.
+    #[test]
+    #[file_serial(path)]
+    fn legacy_review_without_chain_id_is_not_signed() {
+        reset();
+        let tx = eip1559(AVAX_C_CHAIN_MAINNET_ID, 10);
+        assert_eq!(send_tx(&tx), Ok(true));
+
+        let mut ui = SignUI {
+            hash: keccak(&tx),
+            tx: None,
+            is_typed: false,
+            chain_id: None,
+        };
+        let mut out = [0; 100];
+        assert_eq!(ui.accept(&mut out), (0, Error::DataInvalid as u16));
         reset();
     }
 }
