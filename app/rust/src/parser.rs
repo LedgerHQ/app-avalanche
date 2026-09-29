@@ -63,7 +63,7 @@ pub use avm_output::AvmOutput;
 pub use constants::*;
 pub use coreth::{
     bytes_to_u64, data::EthData, export_tx::ExportTx, import_tx::ImportTx, is_avax_chain_bytes,
-    native::EthTransaction, PersonalMsg,
+    native::EthTransaction, parse_rlp_item, PersonalMsg,
 };
 pub use error::ParserError;
 pub use initial_state::InitialState;

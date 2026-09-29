@@ -95,18 +95,20 @@ pub mod resources {
     #[lazy_static]
     pub static mut STREAMING_TX_TYPE: Lock<bool, StreamingAccessors> = Lock::new(false);
 
-    /// Packet buffering for legacy transaction chain ID extraction
-    /// Legacy transactions store chain ID at the end, requiring buffering of last packets
-    /// Last received packet [length_byte, data...] - used for legacy chain ID extraction
-    /// Used in: parse() to buffer packets, finalize_streaming_hash() to extract chain ID from end
-    #[lazy_static]
-    pub static mut LAST_PACKET: Lock<Option<[u8; 255]>, StreamingAccessors> = Lock::new(None);
+    /// Largest tail a streamed legacy transaction may have after its data
+    /// field: the chain ID (up to 8 bytes plus its prefix) and an empty R and S
+    pub const STREAMING_TAIL_CAPACITY: usize = 9 + 1 + 1;
 
-    /// Second-to-last packet [length_byte, data...] - for multi-packet legacy chain ID extraction
-    /// Used in: parse() to rotate packet buffer, finalize_streaming_hash() to combine with last packet
+    /// Tail of a streamed legacy transaction (chain ID, R, S), where the
+    /// chain ID of a legacy transaction lives
+    /// Used in: parse() to collect it, finalize_streaming_hash() to read the chain ID
     #[lazy_static]
-    pub static mut SECOND_LAST_PACKET: Lock<Option<[u8; 255]>, StreamingAccessors> =
-        Lock::new(None);
+    pub static mut STREAMING_TAIL: Lock<[u8; STREAMING_TAIL_CAPACITY], StreamingAccessors> =
+        Lock::new([0; STREAMING_TAIL_CAPACITY]);
+
+    /// Length of that tail, known from the first packet
+    #[lazy_static]
+    pub static mut STREAMING_TAIL_LEN: Lock<u64, StreamingAccessors> = Lock::new(0);
 
     /// Flag indicating if current transaction is legacy type (affects chain ID location)
     /// Used in: parse() to set based on transaction type, packet buffering, and chain ID extraction

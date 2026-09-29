@@ -29,12 +29,13 @@ use crate::{
     crypto::{Curve, ECCInfoFlags},
     dispatcher::ApduHandler,
     handlers::resources::{
-        StreamingAccessors, BUFFER, EXPECTED_BYTES, IS_LEGACY_TX, LAST_PACKET, PATH,
-        RECEIVED_BYTES, SECOND_LAST_PACKET, STREAMING_CHAIN_ID, STREAMING_HASHER, STREAMING_MODE,
-        STREAMING_TX_TYPE,
+        StreamingAccessors, BUFFER, EXPECTED_BYTES, IS_LEGACY_TX, PATH, RECEIVED_BYTES,
+        STREAMING_CHAIN_ID, STREAMING_HASHER, STREAMING_MODE, STREAMING_TAIL,
+        STREAMING_TAIL_CAPACITY, STREAMING_TAIL_LEN, STREAMING_TX_TYPE,
     },
     parser::{
-        bytes_to_u64, is_avax_chain_bytes, DisplayableItem, EthTransaction, FromBytes, U32_SIZE,
+        bytes_to_u64, is_avax_chain_bytes, parse_rlp_item, DisplayableItem, EthTransaction,
+        FromBytes, EIP1559_TX, EIP2930_TX, U32_SIZE, U64_SIZE,
     },
     sys,
     utils::{convert_der_to_rs, is_app_mode_blind_sign, ApduBufferRead},
@@ -61,70 +62,107 @@ fn chain_id_to_array(chain_id_slice: &[u8]) -> Option<[u8; 8]> {
 
 pub struct Sign;
 
-// Extract legacy chain ID by searching backwards for R/S markers
-fn extract_legacy_chain_id_from_end(data: &[u8]) -> Option<[u8; 8]> {
-    // Legacy transaction ends with [chain_id][r][s] where r/s are 0x80
-    // We need to search backwards for the pattern
-    if data.len() < 3 {
-        return None; // Too short to contain chain_id + r + s
+/// Check a chain ID with the rules the normal-mode parsers apply
+fn checked_chain_id(id: &[u8], legacy: bool) -> Result<[u8; 8], ParserError> {
+    if id.is_empty() || id.len() > U64_SIZE {
+        return Err(ParserError::InvalidChainId);
     }
 
-    // Check for common empty R/S patterns at the end
-    // RLP encoding of empty value is 0x80
-    let ends_with_8080 =
-        data.len() >= 2 && data[data.len() - 2] == 0x80 && data[data.len() - 1] == 0x80;
-
-    if ends_with_8080 {
-    } else {
-        return None;
+    // legacy wallets that do not follow EIP-155 may append the mainnet V
+    // (1 * 2 + 35) instead of the chain ID
+    let chain_id = bytes_to_u64(id)?;
+    if chain_id == NONE_CHAIN_ID
+        || chain_id == ETH_MAINNET_ID
+        || (legacy && chain_id == ETH_MAINNET_ID * 2 + 35)
+    {
+        return Err(ParserError::InvalidChainId);
     }
 
-    // Work backwards to find chain ID
-    // For 0x8080 ending, chain ID is before these 2 bytes
-    let chain_id_end = data.len() - 2;
-    let mut chain_id_bytes = [0u8; 8];
-
-    // Look for chain ID patterns. Bytes are right-aligned (BE) so the array
-    // matches `chain_id_to_array`'s layout and survives chain IDs whose low
-    // byte is zero.
-    // Common Avalanche chain ID: 0xa868 (43112 in decimal)
-    // This is encoded as 0x82a868 in RLP (0x82 = prefix for 2-byte string, 0xa868 = value)
-    if chain_id_end >= 3 && data[chain_id_end - 3] == 0x82 {
-        // Two-byte chain ID with RLP prefix 0x82
-        chain_id_bytes[6] = data[chain_id_end - 2];
-        chain_id_bytes[7] = data[chain_id_end - 1];
-        return Some(chain_id_bytes);
-    } else if chain_id_end >= 2 && data[chain_id_end - 2] == 0x81 {
-        // Single-byte chain ID with RLP prefix 0x81
-        chain_id_bytes[7] = data[chain_id_end - 1];
-        return Some(chain_id_bytes);
-    } else if chain_id_end > 0 {
-        let potential_chain_byte = data[chain_id_end - 1];
-        if potential_chain_byte > 0 && potential_chain_byte < 0x80 {
-            // Direct single byte chain ID (no RLP prefix needed for values < 0x80)
-            chain_id_bytes[7] = potential_chain_byte;
-            return Some(chain_id_bytes);
-        }
-    }
-
-    None
+    chain_id_to_array(id).ok_or(ParserError::InvalidChainId)
 }
 
-// Extract metadata from first packet for EIP-1559/EIP-2930 transactions
-fn extract_tx_metadata_for_streaming(data: &[u8]) -> (bool, Option<[u8; 8]>) {
-    // Try to parse transaction using same logic as normal mode
-    let mut temp_tx = MaybeUninit::uninit();
-    if EthTransaction::from_bytes_into(data, &mut temp_tx).is_ok() {
-        let temp_tx = unsafe { temp_tx.assume_init() };
-
-        let is_typed = temp_tx.is_typed_tx();
-        let chain_id_bytes = chain_id_to_array(temp_tx.chain_id());
-
-        (is_typed, chain_id_bytes)
-    } else {
-        // If parsing fails, fall back to legacy (same as None chain_id)
-        (false, None)
+/// Next RLP string in `data`: a list where a field is expected is refused
+fn rlp_string(data: &[u8]) -> Result<(&[u8], &[u8]), ParserError> {
+    if *data.first().ok_or(ParserError::UnexpectedBufferEnd)? >= 0xC0 {
+        return Err(ParserError::InvalidEthMessage);
     }
+
+    Ok(parse_rlp_item(data)?)
+}
+
+/// Header of the RLP string at the start of `data`, without needing its
+/// payload: (header length, payload length)
+fn rlp_string_header(data: &[u8]) -> Result<(usize, u64), ParserError> {
+    match *data.first().ok_or(ParserError::UnexpectedBufferEnd)? {
+        0..=0x7F => Ok((0, 1)),
+        short @ 0x80..=0xB7 => Ok((1, (short - 0x80) as u64)),
+        long @ 0xB8..=0xBF => {
+            let num_bytes = (long - 0xB7) as usize;
+            let len = data
+                .get(1..=num_bytes)
+                .ok_or(ParserError::UnexpectedBufferEnd)?;
+            Ok((1 + num_bytes, bytes_to_u64(len)?))
+        }
+        _ => Err(ParserError::InvalidEthMessage),
+    }
+}
+
+/// Read what the first packet of a streamed transaction tells about it.
+///
+/// `tx` is the start of the transaction, whose RLP list payload starts at
+/// `read` and is `to_read` bytes long. Returns whether it is typed, its
+/// chain ID (for a typed transaction it is the first field) and, for a
+/// legacy one, the length of what follows the data field: the chain ID, R
+/// and S, which only arrive with the last chunks.
+fn parse_stream_start(
+    tx: &[u8],
+    read: usize,
+    to_read: u64,
+) -> Result<(bool, Option<[u8; 8]>, u64), ParserError> {
+    let body = tx.get(read..).ok_or(ParserError::UnexpectedBufferEnd)?;
+
+    if matches!(tx.first(), Some(&EIP1559_TX) | Some(&EIP2930_TX)) {
+        let (_, chain_id) = rlp_string(body)?;
+        return Ok((true, Some(checked_chain_id(chain_id, false)?), 0));
+    }
+
+    // legacy: nonce, gas price, gas limit, to, value, data, [chain ID, R, S]
+    let mut rem = body;
+    for _ in 0..5 {
+        (rem, _) = rlp_string(rem)?;
+    }
+    let (header_len, data_len) = rlp_string_header(rem)?;
+    let data_end = ((body.len() - rem.len() + header_len) as u64)
+        .checked_add(data_len)
+        .ok_or(ParserError::ValueOutOfRange)?;
+
+    let tail_len = to_read
+        .checked_sub(data_end)
+        .ok_or(ParserError::InvalidEthMessage)?;
+    if tail_len == 0 {
+        // no chain ID: pre-EIP-155, valid on every EVM chain
+        return Err(ParserError::InvalidChainId);
+    }
+    if tail_len > STREAMING_TAIL_CAPACITY as u64 {
+        return Err(ParserError::UnexpectedData);
+    }
+
+    Ok((false, None, tail_len))
+}
+
+/// Chain ID of a legacy transaction from its tail (chain ID, R, S)
+fn legacy_tail_chain_id(tail: &[u8]) -> Result<[u8; 8], ParserError> {
+    let (rem, chain_id) = rlp_string(tail)?;
+    let (rem, r) = rlp_string(rem)?;
+    let (rem, s) = rlp_string(rem)?;
+
+    // an unsigned transaction carries an empty (or zero) R and S
+    let unset = |v: &[u8]| v.is_empty() || v == [0];
+    if !rem.is_empty() || !unset(r) || !unset(s) {
+        return Err(ParserError::UnexpectedData);
+    }
+
+    checked_chain_id(chain_id, true)
 }
 
 impl Sign {
@@ -308,9 +346,49 @@ impl Sign {
             *crate::lock_mut!(STREAMING_TX_TYPE).lock(StreamingAccessors::EthSign) = false;
             *crate::lock_mut!(STREAMING_CHAIN_ID).lock(StreamingAccessors::EthSign) = None;
             *crate::lock_mut!(IS_LEGACY_TX).lock(StreamingAccessors::EthSign) = false;
-            *crate::lock_mut!(LAST_PACKET).lock(StreamingAccessors::EthSign) = None;
-            *crate::lock_mut!(SECOND_LAST_PACKET).lock(StreamingAccessors::EthSign) = None;
+            *crate::lock_mut!(STREAMING_TAIL).lock(StreamingAccessors::EthSign) =
+                [0; STREAMING_TAIL_CAPACITY];
+            *crate::lock_mut!(STREAMING_TAIL_LEN).lock(StreamingAccessors::EthSign) = 0;
         }
+    }
+
+    /// Hash the next bytes of a streamed transaction, which start at `offset`
+    /// in its RLP list payload, and keep those that fall in a legacy tail
+    fn stream_bytes(offset: u64, bytes: &[u8]) -> Result<(), ParserError> {
+        unsafe {
+            crate::lock_mut!(STREAMING_HASHER)
+                .acquire(StreamingAccessors::EthSign)
+                .map_err(|_| ParserError::UnexpectedError)?
+                .as_mut()
+                .ok_or(ParserError::UnexpectedError)?
+                .update(bytes)
+                .map_err(|_| ParserError::UnexpectedError)?;
+
+            if !*crate::lock_mut!(IS_LEGACY_TX).lock(StreamingAccessors::EthSign) {
+                return Ok(());
+            }
+
+            let expected = *crate::lock_mut!(EXPECTED_BYTES).lock(StreamingAccessors::EthSign);
+            let tail_len = *crate::lock_mut!(STREAMING_TAIL_LEN).lock(StreamingAccessors::EthSign);
+            let tail_start = expected.saturating_sub(tail_len);
+
+            // callers never pass bytes past the end of the transaction
+            let end = offset.saturating_add(bytes.len() as u64);
+            if end <= tail_start {
+                return Ok(());
+            }
+            let skip = tail_start.saturating_sub(offset) as usize;
+            let at = (offset + skip as u64 - tail_start) as usize;
+            let bytes = &bytes[skip..];
+
+            crate::lock_mut!(STREAMING_TAIL)
+                .lock(StreamingAccessors::EthSign)
+                .get_mut(at..at + bytes.len())
+                .ok_or(ParserError::UnexpectedError)?
+                .copy_from_slice(bytes);
+        }
+
+        Ok(())
     }
 
     #[inline(never)]
@@ -345,55 +423,18 @@ impl Sign {
             stored_is_typed
         };
 
-        // Extract chain ID - for legacy transactions, extract from buffered packets
+        // A legacy transaction carries its chain ID at the end
         let chain_id = unsafe {
-            let is_legacy = *crate::lock_mut!(IS_LEGACY_TX).lock(StreamingAccessors::EthSign);
+            if *crate::lock_mut!(IS_LEGACY_TX).lock(StreamingAccessors::EthSign) {
+                let tail_len =
+                    *crate::lock_mut!(STREAMING_TAIL_LEN).lock(StreamingAccessors::EthSign);
+                let tail = crate::lock_mut!(STREAMING_TAIL).lock(StreamingAccessors::EthSign);
+                let tail = tail
+                    .get(..tail_len as usize)
+                    .ok_or(ParserError::UnexpectedError)?;
 
-            if is_legacy {
-                // Try to extract chain ID from buffered packets
-                let last = crate::lock_mut!(LAST_PACKET).lock(StreamingAccessors::EthSign);
-                let second_last =
-                    crate::lock_mut!(SECOND_LAST_PACKET).lock(StreamingAccessors::EthSign);
-
-                // Combine last two packets if available
-                let chain_id_from_end = if let (Some(last_packet), Some(second_last_packet)) =
-                    (last.as_ref(), second_last.as_ref())
-                {
-                    // Extract actual lengths from first byte
-                    let last_len = last_packet[0] as usize;
-                    let second_last_len = second_last_packet[0] as usize;
-
-                    // Combine packets using actual lengths
-                    let mut combined = [0u8; 510];
-                    let second_last_data = &second_last_packet[1..=second_last_len];
-                    let last_data = &last_packet[1..=last_len];
-
-                    combined[..second_last_len].copy_from_slice(second_last_data);
-                    combined[second_last_len..second_last_len + last_len]
-                        .copy_from_slice(last_data);
-
-                    let total_len = second_last_len + last_len;
-                    extract_legacy_chain_id_from_end(&combined[..total_len])
-                } else if let Some(last_packet) = last.as_ref() {
-                    // Single packet case (transaction fits in one packet)
-                    let last_len = last_packet[0] as usize;
-                    let last_data = &last_packet[1..=last_len];
-                    extract_legacy_chain_id_from_end(last_data)
-                } else {
-                    None
-                };
-
-                // If we found chain ID in legacy packets, store it
-                if let Some(chain_id_bytes) = chain_id_from_end {
-                    *crate::lock_mut!(STREAMING_CHAIN_ID).lock(StreamingAccessors::EthSign) =
-                        Some(chain_id_bytes);
-                    Some(chain_id_bytes)
-                } else {
-                    // Fallback to stored value (should be None for legacy)
-                    *crate::lock_mut!(STREAMING_CHAIN_ID).lock(StreamingAccessors::EthSign)
-                }
+                Some(legacy_tail_chain_id(tail)?)
             } else {
-                // For typed transactions, use previously extracted chain ID
                 *crate::lock_mut!(STREAMING_CHAIN_ID).lock(StreamingAccessors::EthSign)
             }
         };
@@ -482,31 +523,22 @@ impl Sign {
                         return Err(ParserError::BlindSignNotEnabled);
                     }
 
-                    // Detect if transaction is legacy (doesn't start with 0x01 or 0x02)
-                    let is_legacy = !rest.is_empty() && rest[0] != 0x01 && rest[0] != 0x02;
+                    // Apply the chain-ID policy of normal mode from the first
+                    // packet (a legacy chain ID is checked when it arrives)
+                    let (is_typed, chain_id_bytes, tail_len) =
+                        parse_stream_start(rest, read, to_read)?;
 
-                    // Extract metadata using same parsing logic as normal mode
-                    let (is_typed, chain_id_bytes) = if is_legacy {
-                        // For legacy, we can't get chain ID from first packet
-                        (false, None)
-                    } else {
-                        extract_tx_metadata_for_streaming(rest)
-                    };
-
-                    // Initialize streaming hash mode
+                    // Initialize streaming hash mode, starting with the
+                    // version and the list header
                     let mut hasher =
                         Keccak::<32>::new().map_err(|_| ParserError::UnexpectedError)?;
-
-                    // Hash the data we have so far
-                    let len = core::cmp::min(total_size, rest.len());
                     hasher
-                        .update(&rest[..len])
+                        .update(&rest[..read])
                         .map_err(|_| ParserError::UnexpectedError)?;
+                    let len = core::cmp::min(total_size, rest.len());
 
                     // Store state for subsequent packets
                     unsafe {
-                        use crate::handlers::resources::{STREAMING_CHAIN_ID, STREAMING_TX_TYPE};
-
                         crate::lock_mut!(STREAMING_HASHER)
                             .lock(StreamingAccessors::EthSign)
                             .replace(hasher);
@@ -521,21 +553,14 @@ impl Sign {
                             is_typed;
                         *crate::lock_mut!(STREAMING_CHAIN_ID).lock(StreamingAccessors::EthSign) =
                             chain_id_bytes;
-
-                        // Track if this is a legacy transaction
                         *crate::lock_mut!(IS_LEGACY_TX).lock(StreamingAccessors::EthSign) =
-                            is_legacy;
-
-                        // For legacy, store first packet for potential single-packet case
-                        if is_legacy && len <= 254 {
-                            let mut first_packet = [0u8; 255];
-                            first_packet[0] = len as u8; // Store actual length
-                            first_packet[1..=len].copy_from_slice(&rest[..len]);
-                            crate::lock_mut!(LAST_PACKET)
-                                .lock(StreamingAccessors::EthSign)
-                                .replace(first_packet);
-                        }
+                            !is_typed;
+                        *crate::lock_mut!(STREAMING_TAIL_LEN).lock(StreamingAccessors::EthSign) =
+                            tail_len;
                     }
+
+                    // Hash the data we have so far
+                    Self::stream_bytes(0, &rest[read..len])?;
 
                     // Check if complete in first packet
                     if total_size <= rest.len() {
@@ -576,55 +601,19 @@ impl Sign {
                     unsafe { *crate::lock_mut!(STREAMING_MODE).lock(StreamingAccessors::EthSign) };
 
                 if streaming {
-                    // For legacy transactions, buffer packets for chain ID extraction
-                    let is_legacy = unsafe {
-                        *crate::lock_mut!(IS_LEGACY_TX).lock(StreamingAccessors::EthSign)
-                    };
-
-                    if is_legacy && !payload.is_empty() {
-                        // Rotate packet buffers: last -> second_last, current -> last
-                        unsafe {
-                            let last =
-                                crate::lock_mut!(LAST_PACKET).lock(StreamingAccessors::EthSign);
-                            let second_last = crate::lock_mut!(SECOND_LAST_PACKET)
-                                .lock(StreamingAccessors::EthSign);
-
-                            // Move last to second_last (if it exists)
-                            *second_last = *last;
-
-                            // Store current packet with length in first byte
-                            if payload.len() <= 254 {
-                                let mut new_last = [0u8; 255];
-                                new_last[0] = payload.len() as u8; // Store actual length
-                                new_last[1..=payload.len()].copy_from_slice(payload);
-                                last.replace(new_last);
-                            }
-                        }
-                    }
-
-                    // Update hash with new data
-                    unsafe {
-                        if let Some(hasher) = crate::lock_mut!(STREAMING_HASHER)
-                            .acquire(StreamingAccessors::EthSign)
-                            .map_err(|_| ParserError::UnexpectedError)?
-                        {
-                            hasher
-                                .update(payload)
-                                .map_err(|_| ParserError::UnexpectedError)?;
-                        } else {
-                            return Err(ParserError::UnexpectedError);
-                        }
-                    }
-
-                    // Update received bytes counter
                     let received_bytes = unsafe {
                         crate::lock_mut!(RECEIVED_BYTES).lock(StreamingAccessors::EthSign)
                     };
-                    *received_bytes = received_bytes.saturating_add(payload.len() as u64);
-
                     let expected_bytes = unsafe {
                         *crate::lock_mut!(EXPECTED_BYTES).lock(StreamingAccessors::EthSign)
                     };
+
+                    // Only the bytes of the transaction are hashed, as in
+                    // normal mode: anything past its end is ignored
+                    let missing = expected_bytes.saturating_sub(*received_bytes);
+                    let len = core::cmp::min(missing, payload.len() as u64) as usize;
+                    Self::stream_bytes(*received_bytes, &payload[..len])?;
+                    *received_bytes = received_bytes.saturating_add(len as u64);
 
                     if *received_bytes >= expected_bytes {
                         Self::finalize_streaming_hash()?;
@@ -1391,6 +1380,162 @@ mod session_tests {
         // the next request was not given NFT info
         assert_eq!(send_tx(&nft_tx), Ok(true));
         assert!(!rendered().contains("ERC-721"), "stale NFT info used");
+        reset();
+    }
+
+    fn legacy(chain_id: Option<u64>, data_len: usize) -> Vec<u8> {
+        let mut fields = std::vec![
+            uint(1),
+            uint(30_000_000_000),
+            uint(100_000),
+            item(&[0xa1; 20]),
+            uint(0),
+            item(&std::vec![0x5a; data_len]),
+        ];
+        if let Some(id) = chain_id {
+            fields.extend([uint(id as u128), item(&[]), item(&[])]);
+        }
+        list(&fields)
+    }
+
+    /// Big legacy tx with the given nonce, chain ID and R items (S empty)
+    fn legacy_fields(nonce: Vec<u8>, chain_id: Vec<u8>, r: Vec<u8>) -> Vec<u8> {
+        list(&[
+            nonce,
+            uint(30_000_000_000),
+            uint(100_000),
+            item(&[0xa1; 20]),
+            uint(0),
+            item(&std::vec![0x5a; Sign::BUFFER_CAPACITY + 100]),
+            chain_id,
+            r,
+            item(&[]),
+        ])
+    }
+
+    fn eip1559_big(chain_id: u64) -> Vec<u8> {
+        eip1559(chain_id, Sign::BUFFER_CAPACITY + 100)
+    }
+
+    fn legacy_big(chain_id: Option<u64>) -> Vec<u8> {
+        legacy(chain_id, Sign::BUFFER_CAPACITY + 100)
+    }
+
+    fn ui_signing_info() -> (bool, Option<u64>) {
+        match unsafe { crate::lock_mut!(ETH_UI).lock(EthAccessors::Tx) } {
+            Some(EthUi::Tx(ui)) => (ui.is_typed, ui.chain_id.map(u64::from_be_bytes)),
+            _ => panic!("no tx review stored"),
+        }
+    }
+
+    // AVAX-32: a streamed typed transaction must be signed as typed, with
+    // the chain ID it carries.
+    #[test]
+    #[file_serial(path)]
+    fn streamed_tx_keeps_type_and_chain_id() {
+        reset();
+        let tx = eip1559_big(AVAX_C_CHAIN_MAINNET_ID);
+        assert_eq!(send_tx(&tx), Ok(true));
+        assert_eq!(ui_signing_info(), (true, Some(AVAX_C_CHAIN_MAINNET_ID)));
+        assert_eq!(ui_hash(), keccak(&tx));
+
+        for chain_id in [AVAX_C_CHAIN_MAINNET_ID, 256, 324846] {
+            reset();
+            let tx = legacy_big(Some(chain_id));
+            assert_eq!(send_tx(&tx), Ok(true));
+            assert_eq!(ui_signing_info(), (false, Some(chain_id)));
+            assert_eq!(ui_hash(), keccak(&tx));
+        }
+        reset();
+    }
+
+    // AVAX-19: the chain-ID policy of normal mode applies to streamed
+    // transactions too.
+    #[test]
+    #[file_serial(path)]
+    fn streamed_tx_follows_chain_id_policy() {
+        let accepted = [
+            ("typed on chain 1", eip1559_big(1)),
+            ("typed on chain 0", eip1559_big(0)),
+            ("legacy on chain 1", legacy_big(Some(1))),
+            ("legacy on chain 37", legacy_big(Some(37))),
+            ("pre-EIP-155 legacy", legacy_big(None)),
+            ("typed, chain ID as a list", {
+                let mut tx = std::vec![EIP1559_TX];
+                tx.extend(list(&[
+                    list(&[uint(AVAX_C_CHAIN_MAINNET_ID as u128)]),
+                    item(&std::vec![0x5a; Sign::BUFFER_CAPACITY + 100]),
+                ]));
+                tx
+            }),
+            (
+                "legacy, chain ID as a list",
+                legacy_fields(
+                    list(&[]),
+                    list(&[uint(AVAX_C_CHAIN_MAINNET_ID as u128)]),
+                    item(&[]),
+                ),
+            ),
+            (
+                "legacy, R as a list",
+                legacy_fields(list(&[]), uint(AVAX_C_CHAIN_MAINNET_ID as u128), list(&[])),
+            ),
+            (
+                "legacy, a field as a list",
+                legacy_fields(
+                    list(&[uint(1)]),
+                    uint(AVAX_C_CHAIN_MAINNET_ID as u128),
+                    item(&[]),
+                ),
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, tx)| {
+            reset();
+            send_tx(tx).is_ok() || unsafe { rs_eth_was_streaming_mode_used() }
+        })
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+        reset();
+        assert!(accepted.is_empty(), "accepted: {accepted:?}");
+    }
+
+    // The legacy chain ID is read from the end of the stream, however the
+    // host splits the chunks.
+    #[test]
+    #[file_serial(path)]
+    fn streamed_legacy_chain_id_survives_small_chunks() {
+        reset();
+        let tx = legacy_big(Some(AVAX_C_CHAIN_MAINNET_ID));
+        let (res, rest) = send_init(&tx);
+        assert_eq!(res, Ok(false));
+
+        let (body, end) = rest.split_at(rest.len() - 6);
+        for chunk in body.chunks(255) {
+            assert_eq!(apdu(0x80, chunk), Ok(false));
+        }
+        let mut res = Ok(false);
+        for byte in end.chunks(1) {
+            res = apdu(0x80, byte);
+        }
+        assert_eq!(res, Ok(true));
+        assert_eq!(ui_signing_info(), (false, Some(AVAX_C_CHAIN_MAINNET_ID)));
+        assert_eq!(ui_hash(), keccak(&tx));
+        reset();
+    }
+
+    // Bytes sent past the end of a streamed transaction are not signed,
+    // as in normal mode.
+    #[test]
+    #[file_serial(path)]
+    fn streamed_bytes_past_the_end_are_ignored() {
+        reset();
+        let tx = eip1559_big(AVAX_C_CHAIN_MAINNET_ID);
+        let mut padded = tx.clone();
+        padded.extend_from_slice(&[0xee; 7]);
+
+        assert_eq!(send_tx(&padded), Ok(true));
+        assert_eq!(ui_hash(), keccak(&tx));
         reset();
     }
 }
