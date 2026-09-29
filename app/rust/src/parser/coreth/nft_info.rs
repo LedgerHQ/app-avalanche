@@ -44,6 +44,10 @@ impl NftInfo {
         self.contract_address.address()
     }
 
+    /// Render the collection name.
+    ///
+    /// The descriptor comes from the host and its signature is not checked,
+    /// so callers title this screen as unverified.
     pub fn render_collection_name(&self, message: &mut [u8], page: u8) -> Result<u8, ViewError> {
         let not_found = pic_str!(b"Collection Name not provided?");
 
@@ -88,8 +92,9 @@ impl<'b> FromBytes<'b> for NftInfo {
 
         let (rem, name) = take(name_len)(&input[1..])?;
 
-        // check for a well-formed name as only ascii is supported
-        if !name.is_ascii() {
+        // only printable ascii: a NUL or control byte could blank or
+        // rewrite what the screen shows
+        if !name.iter().all(|c| (0x20..=0x7E).contains(c)) {
             return Err(ParserError::InvalidAsciiValue.into());
         }
 
@@ -140,5 +145,25 @@ mod tests {
 
         assert_eq!(&info.collection_name[..name.len()], name);
         assert!(info.collection_name[name.len()..].iter().all(|b| *b == 0));
+    }
+
+    fn descriptor(name: &[u8]) -> std::vec::Vec<u8> {
+        let mut out = std::vec![1u8, 1, name.len() as u8];
+        out.extend_from_slice(name);
+        out.extend_from_slice(&[0xa1; ADDRESS_LEN]);
+        out.extend_from_slice(&43114u64.to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn collection_name_must_be_printable() {
+        assert!(NftInfo::from_bytes(&descriptor(b"Lucid Labs")).is_ok());
+
+        for name in [&b"\0\0\0Lucid"[..], b"Lu\ncid", b"Lucid\x7f", b"\x1bLucid"] {
+            assert!(
+                NftInfo::from_bytes(&descriptor(name)).is_err(),
+                "{name:?} accepted"
+            );
+        }
     }
 }

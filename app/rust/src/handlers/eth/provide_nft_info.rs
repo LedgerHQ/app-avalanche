@@ -33,8 +33,9 @@ impl Info {
 
         // store the information use to parse erc721 token
         unsafe {
+            // held by the provider until the next sign request claims it
             crate::lock_mut!(crate::handlers::resources::NFT_INFO)
-                .lock(super::signing::Sign)
+                .lock(Info)
                 .replace(nft_info);
         }
 

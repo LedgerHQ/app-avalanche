@@ -279,6 +279,22 @@ impl Sign {
         Ok(())
     }
 
+    /// Hand the NFT info provided since the last request to this one, and
+    /// drop any info an earlier request already used.
+    #[cfg(feature = "erc721")]
+    fn claim_nft_info() {
+        use crate::handlers::{eth::provide_nft_info::Info, resources::NFT_INFO};
+
+        unsafe {
+            let nft_info = crate::lock_mut!(NFT_INFO);
+            if nft_info.acquire(Info).is_ok() {
+                nft_info.lock(Self);
+            } else {
+                nft_info.lock(Self).take();
+            }
+        }
+    }
+
     /// Drop all the state of a streamed transaction
     fn reset_streaming() {
         unsafe {
@@ -441,6 +457,8 @@ impl Sign {
                 unsafe {
                     crate::lock_mut!(ETH_UI).lock(EthAccessors::Tx).take();
                 }
+                #[cfg(feature = "erc721")]
+                Self::claim_nft_info();
 
                 let payload = buffer.payload().map_err(|_| ParserError::NoData)?;
                 //parse path to verify it's the data we expect
@@ -1304,6 +1322,75 @@ mod session_tests {
         assert_eq!(res, Err(ParserError::BlindSignNotEnabled));
         assert!(!unsafe { rs_eth_was_streaming_mode_used() });
         assert!(!unsafe { *crate::lock_mut!(STREAMING_MODE).lock(StreamingAccessors::EthSign) });
+        reset();
+    }
+
+    // AVAX-17: NFT info serves the one request it was provided for; a later
+    // request must not pick it up.
+    #[test]
+    #[cfg(feature = "erc721")]
+    #[file_serial(path)]
+    fn nft_info_is_claimed_by_one_request() {
+        use crate::handlers::eth::provide_nft_info::Info;
+
+        reset();
+
+        const NFT: [u8; 20] = [0xa1; 20];
+        let mut descriptor = std::vec![1u8, 1, 4];
+        descriptor.extend_from_slice(b"Test");
+        descriptor.extend_from_slice(&NFT);
+        descriptor.extend_from_slice(&AVAX_C_CHAIN_MAINNET_ID.to_be_bytes());
+
+        // transferFrom(0xc3.., 0xb2.., 1)
+        let mut data = hex::decode("23b872dd").unwrap();
+        data.extend_from_slice(&[0; 12]);
+        data.extend_from_slice(&[0xc3; 20]);
+        data.extend_from_slice(&[0; 12]);
+        data.extend_from_slice(&[0xb2; 20]);
+        let mut token_id = [0; 32];
+        token_id[31] = 1;
+        data.extend_from_slice(&token_id);
+
+        let mut nft_tx = std::vec![EIP1559_TX];
+        nft_tx.extend(list(&[
+            uint(AVAX_C_CHAIN_MAINNET_ID as u128),
+            uint(1),
+            uint(1_000_000_000),
+            uint(30_000_000_000),
+            uint(100_000),
+            item(&NFT),
+            uint(0),
+            item(&data),
+            list(&[]),
+        ]));
+
+        let rendered = || {
+            let ui = unsafe { crate::lock_mut!(ETH_UI).lock(EthAccessors::Tx) };
+            let ui = ui.as_mut().expect("no review stored");
+            let mut shown = std::string::String::new();
+            for i in 0..ui.num_items().unwrap() {
+                let (mut title, mut msg) = ([0u8; 64], [0u8; 256]);
+                ui.render_item(i, &mut title, &mut msg, 0).unwrap();
+                shown.push_str(std::str::from_utf8(&title).unwrap());
+                shown.push_str(std::str::from_utf8(&msg).unwrap());
+            }
+            shown
+        };
+
+        // provided right before: the request uses it
+        Info::process(&descriptor).unwrap();
+        assert_eq!(send_tx(&nft_tx), Ok(true));
+        assert!(rendered().contains("ERC-721"));
+
+        // provided, then an abandoned multi-chunk request
+        reset();
+        Info::process(&descriptor).unwrap();
+        let (res, _) = send_init(&eip1559(AVAX_C_CHAIN_MAINNET_ID, 600));
+        assert_eq!(res, Ok(false));
+
+        // the next request was not given NFT info
+        assert_eq!(send_tx(&nft_tx), Ok(true));
+        assert!(!rendered().contains("ERC-721"), "stale NFT info used");
         reset();
     }
 }

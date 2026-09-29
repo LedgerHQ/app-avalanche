@@ -559,13 +559,8 @@ mod tests {
         crate::parser::ERC721Info::set_info(info).unwrap();
     }
 
-    #[test]
-    #[cfg(feature = "erc721")]
-    #[serial_test::file_serial(path)]
-    fn erc721_call_with_native_value_shows_value() {
-        provide_nft_info(&EOA, AVAX_C_CHAIN_MAINNET_ID);
-
-        // transferFrom(from, to, 1)
+    /// transferFrom(0xc3.., RECIPIENT, 1)
+    pub(crate) fn erc721_transfer_from_calldata() -> Vec<u8> {
         let mut data = hex::decode("23b872dd").unwrap();
         data.extend_from_slice(&[0; 12]);
         data.extend_from_slice(&[0xc3; 20]);
@@ -574,6 +569,15 @@ mod tests {
         let mut token_id = [0; 32];
         token_id[31] = 1;
         data.extend_from_slice(&token_id);
+        data
+    }
+
+    #[test]
+    #[cfg(feature = "erc721")]
+    #[serial_test::file_serial(path)]
+    fn erc721_call_with_native_value_shows_value() {
+        provide_nft_info(&EOA, AVAX_C_CHAIN_MAINNET_ID);
+        let data = erc721_transfer_from_calldata();
 
         let hidden: Vec<_> = [
             (
@@ -605,6 +609,54 @@ mod tests {
         ));
         assert!(pages.iter().any(|p| p.contains("ERC-20")), "{pages:#?}");
         assert!(!pages.iter().any(|p| p.contains("Value")), "{pages:#?}");
+    }
+
+    // AVAX-17: NFT info provided for an allow-listed ERC-20 must not turn a
+    // token approve into an NFT approve.
+    #[test]
+    #[cfg(all(feature = "erc721", feature = "erc20"))]
+    #[serial_test::file_serial(path)]
+    fn allow_listed_erc20_never_renders_as_nft() {
+        const USDC: [u8; 20] = [
+            0xB9, 0x7E, 0xF9, 0xEF, 0x87, 0x34, 0xC7, 0x19, 0x04, 0xD8, 0x00, 0x2F, 0x8B, 0x6B,
+            0xC6, 0x6D, 0xD9, 0xC4, 0x8A, 0x6E,
+        ];
+        provide_nft_info(&USDC, AVAX_C_CHAIN_MAINNET_ID);
+
+        // approve(spender, MAX)
+        let mut data = hex::decode("095ea7b3").unwrap();
+        data.extend_from_slice(&[0; 12]);
+        data.extend_from_slice(&RECIPIENT);
+        data.extend_from_slice(&[0xff; 32]);
+
+        let pages = render_all(eip1559_tx(AVAX_C_CHAIN_MAINNET_ID, &USDC, 0, &data));
+        assert!(
+            pages.iter().any(|p| p.contains("ERC-20")),
+            "USDC approve not shown as ERC-20: {pages:#?}"
+        );
+        assert!(!pages.iter().any(|p| p.contains("ERC-721")), "{pages:#?}");
+    }
+
+    // AVAX-17: the NFT descriptor is not authenticated, so its collection
+    // name is labelled as such.
+    #[test]
+    #[cfg(feature = "erc721")]
+    #[serial_test::file_serial(path)]
+    fn nft_collection_name_marked_unverified() {
+        provide_nft_info(&EOA, AVAX_C_CHAIN_MAINNET_ID);
+
+        let pages = render_all(eip1559_tx(
+            AVAX_C_CHAIN_MAINNET_ID,
+            &EOA,
+            0,
+            &erc721_transfer_from_calldata(),
+        ));
+        assert!(
+            pages
+                .iter()
+                .any(|p| p == "\"NFT (unverified)\": \"Test\""),
+            "{pages:#?}"
+        );
     }
 
     #[test]

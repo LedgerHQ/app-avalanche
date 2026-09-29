@@ -86,9 +86,18 @@ impl<'b> EthData<'b> {
                     // a generic contract call
                     cfg_if::cfg_if! {
                         if #[cfg(all(feature = "erc721", feature = "erc20"))] {
-                            Self::parse_erc721(to, data, out)
-                                .or_else(|_| Self::parse_erc20(to, data, out))
-                                .or_else(|_| Self::parse_contract_call(data, out))?;
+                            if ERC20::is_known_token(to) {
+                                // An allow-listed ERC-20 is never an NFT
+                                // collection, whatever NFT info the host
+                                // provided: ERC-721 shares the approve and
+                                // transferFrom selectors with ERC-20
+                                Self::parse_erc20(to, data, out)
+                                    .or_else(|_| Self::parse_contract_call(data, out))?;
+                            } else {
+                                Self::parse_erc721(to, data, out)
+                                    .or_else(|_| Self::parse_erc20(to, data, out))
+                                    .or_else(|_| Self::parse_contract_call(data, out))?;
+                            }
                         } else if #[cfg(feature = "erc721")] {
                             Self::parse_erc721(to, data, out)
                                 .or_else(|_| Self::parse_contract_call(data, out))?;

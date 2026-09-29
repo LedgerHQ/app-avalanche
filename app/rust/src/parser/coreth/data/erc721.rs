@@ -84,7 +84,7 @@ impl DisplayableItem for BaseTransfer<'_> {
                 self.to.render_eth_address(message, page)
             }
             1 => {
-                let label = pic_str!(b"Collection Name");
+                let label = pic_str!(b"NFT (unverified)");
                 title[..label.len()].copy_from_slice(label);
 
                 nft_info.render_collection_name(message, page)
@@ -482,7 +482,7 @@ impl<'b> ERC721<'b> {
                 this.controller.render_eth_address(message, page)
             }
             1 => {
-                let label = pic_str!(b"To Manage your");
+                let label = pic_str!(b"NFT (unverified)");
                 title[..label.len()].copy_from_slice(label);
                 nft_info.render_collection_name(message, page)
             }
@@ -522,7 +522,7 @@ impl<'b> ERC721<'b> {
                 this.controller.render_eth_address(message, page)
             }
             1 => {
-                let label = pic_str!(b"To Manage ALL");
+                let label = pic_str!(b"ALL (unverified)");
                 title[..label.len()].copy_from_slice(label);
                 nft_info.render_collection_name(message, page)
             }

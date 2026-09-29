@@ -210,6 +210,11 @@ impl ERC20__Type {
 }
 
 impl<'b> ERC20<'b> {
+    /// Whether `contract_address` is one of the allow-listed ERC-20 tokens
+    pub fn is_known_token(contract_address: &Address) -> bool {
+        get_token_info(contract_address.raw_address()).is_some()
+    }
+
     pub fn method_name(&self) -> &'static [u8] {
         match self {
             ERC20::Transfer { .. } => pic_str!(b"transfer"!),
