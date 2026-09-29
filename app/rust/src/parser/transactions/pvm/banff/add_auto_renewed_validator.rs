@@ -178,7 +178,10 @@ impl DisplayableItem for AddAutoRenewedValidatorTx<'_> {
         let base_outputs_items = self.base_tx.base_outputs_num_items()?;
         let stake_outputs_items = self.num_stake_items()?;
 
-        let total_items = self.num_items()?;
+        // what render_last_items shows: the owner addresses and the four
+        // trailing fields, i.e. everything after the stake outputs
+        let last_items = self.num_items()?
+            - (2 + base_outputs_items + signer_items + stake_outputs_items);
 
         match_ranges! {
             match item_n alias x {
@@ -192,7 +195,7 @@ impl DisplayableItem for AddAutoRenewedValidatorTx<'_> {
                 until 1 => self.node_id.render_item(0, title, message, page),
                 until signer_items => self.signer.render_item(x, title, message, page),
                 until stake_outputs_items => self.render_stake_outputs(x, title, message, page),
-                until total_items => self.render_last_items(x, title, message, page),
+                until last_items => self.render_last_items(x, title, message, page),
                 _ => Err(ViewError::NoData),
             }
         }

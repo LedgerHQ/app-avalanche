@@ -48,6 +48,13 @@ fn expr_to_paren_expr(expr: Box<Expr>) -> Box<Expr> {
     parse_quote! { ( #expr ) }
 }
 
+// The guards compare against sums of arm widths. In the matched type (u8 for
+// every UI item index) `base + width` overflows as soon as the widths add up
+// past its range, which panics, so the guards are evaluated in usize instead.
+fn expr_to_usize(expr: Box<Expr>) -> Box<Expr> {
+    parse_quote! { (( #expr ) as usize) }
+}
+
 #[derive(Debug)]
 enum RangePat {
     Lit(Option<kw::until>, Lit),
@@ -160,19 +167,25 @@ struct MatchRanges {
 }
 
 impl MatchRanges {
-    fn base_for_arm(&self, idx: usize) -> Option<Box<Expr>> {
+    /// Sum of the widths of the arms before `idx`, with every term passed
+    /// through `map` first.
+    fn base_for_arm_with(
+        &self,
+        idx: usize,
+        map: impl Fn(Box<Expr>) -> Box<Expr>,
+    ) -> Option<Box<Expr>> {
         let arms = self.arms.get(..idx).expect("arm idx in range");
         match arms {
             [] => None,
-            [first] => first.as_base_expr().map(Box::new),
+            [first] => first.as_base_expr().map(Box::new).map(&map),
             [first, rest @ ..] => {
-                let first = first.as_base_expr().map(Box::new).unwrap_or_else(|| {
+                let first = first.as_base_expr().map(Box::new).map(&map).unwrap_or_else(|| {
                     let span = first.pat.span();
                     abort!(span, "wilcard is only allowed in the last arm")
                 });
                 Some(rest.iter().fold(first, |acc, x| {
                     let acc = expr_to_paren_expr(acc);
-                    if let Some(expr) = x.as_base_expr().map(Box::new) {
+                    if let Some(expr) = x.as_base_expr().map(Box::new).map(&map) {
                         parse_quote! { #acc + #expr }
                     } else {
                         acc
@@ -182,21 +195,29 @@ impl MatchRanges {
         }
     }
 
+    fn base_for_arm(&self, idx: usize) -> Option<Box<Expr>> {
+        self.base_for_arm_with(idx, |expr| expr)
+    }
+
     fn guard_for_arm(&self, idx: usize) -> Option<Box<Expr>> {
         let ident = &self.ident_name;
         let next = self.arms.get(idx).expect("arm idx in range");
 
-        let base = self.base_for_arm(idx);
+        // Widened, so neither the base nor base + width can overflow. The
+        // body still subtracts the base in the matched type, which is safe
+        // once the guard has established ident >= base.
+        let base = self.base_for_arm_with(idx, expr_to_usize);
+        let wide_ident: Box<Expr> = parse_quote! { (#ident as usize) };
 
         let is_wild = next.pat.is_wild();
-        let guard = match (base, next.as_base_expr()) {
+        let guard = match (base, next.as_base_expr().map(Box::new).map(expr_to_usize)) {
             _ if is_wild => None,
             (None, None) => None,
-            (Some(base), None) => Some(parse_quote! { #ident < #base }),
+            (Some(base), None) => Some(parse_quote! { #wide_ident < #base }),
             (Some(base), Some(expr)) => {
-                Some(parse_quote! { (#ident >= #base) && (#ident < #base + #expr) })
+                Some(parse_quote! { (#wide_ident >= #base) && (#wide_ident < #base + #expr) })
             }
-            (None, Some(expr)) => Some(parse_quote! { #ident < #expr }),
+            (None, Some(expr)) => Some(parse_quote! { #wide_ident < #expr }),
         };
 
         match (guard, &next.extra_guard) {

@@ -52,6 +52,9 @@ mod proof_of_possession;
 #[cfg(test)]
 mod snapshots_common;
 
+#[cfg(test)]
+pub(crate) mod tx_builder;
+
 pub use address::*;
 pub use addressed_call::*;
 pub use addressed_call_payloads::*;

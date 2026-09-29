@@ -112,17 +112,16 @@ impl DisplayableItem for AddDelegatorTx<'_> {
         // rewards_to, stake items and fee
         //
         let validator_items = self.validator.num_items()?;
-        let rewards_items = self.rewards_owner.addresses.len() as u8;
         let base_outputs = self.base_tx.base_outputs_num_items()?;
         let stake_items = self.num_stake_items()?;
 
         checked_add!(
             ViewError::Unknown,
-            2u8,
+            1u8,
             validator_items,
-            rewards_items,
             base_outputs,
-            stake_items
+            stake_items,
+            self.num_last_items()?
         )
     }
 
@@ -136,8 +135,7 @@ impl DisplayableItem for AddDelegatorTx<'_> {
         let validator_items = self.validator.num_items()?;
         let base_outputs_items = self.base_tx.base_outputs_num_items()?;
         let stake_outputs_items = self.num_stake_items()?;
-
-        let total_items = self.num_items()?;
+        let last_items = self.num_last_items()?;
 
         match_ranges! {
             match item_n alias x {
@@ -150,7 +148,7 @@ impl DisplayableItem for AddDelegatorTx<'_> {
                 until base_outputs_items => self.render_base_outputs(x, title, message, page),
                 until validator_items => self.validator.render_item(x, title, message, page),
                 until stake_outputs_items => self.render_stake_outputs(x, title, message, page),
-                until total_items => self.render_last_items(x, title, message, page),
+                until last_items => self.render_last_items(x, title, message, page),
                 _ => Err(ViewError::NoData),
             }
         }
@@ -359,6 +357,12 @@ impl<'b> AddDelegatorTx<'b> {
             .render_address_with_hrp(hrp, addr_idx, message, page)
     }
 
+    // rewards owner addresses and the fee
+    fn num_last_items(&self) -> Result<u8, ViewError> {
+        let rewards_items = self.rewards_owner.addresses.len() as u8;
+        checked_add!(ViewError::Unknown, rewards_items, 1u8)
+    }
+
     fn render_last_items(
         &self,
         item_n: u8,
@@ -471,5 +475,48 @@ mod tests {
     fn parse_add_delegator() {
         let (_, tx) = AddDelegatorTx::from_bytes(DATA).unwrap();
         assert_eq!(tx.validator.stake(), 2000000000000);
+    }
+
+    #[test]
+    fn match_ranges_guard_does_not_overflow() {
+        // The guard of the second arm is x >= 200 && x < 200 + 100, which
+        // overflowed u8 before match_ranges! widened its arithmetic.
+        let (first, second) = (200u8, 100u8);
+        let arm = |item: u8| -> u8 {
+            match_ranges! {
+                match item alias x {
+                    until first => 0,
+                    until second => x + 1,
+                    _ => 0xff,
+                }
+            }
+        };
+        assert_eq!(arm(0), 0);
+        assert_eq!(arm(199), 0);
+        assert_eq!(arm(200), 1);
+        assert_eq!(arm(255), 56);
+    }
+
+    #[test]
+    fn many_items_render_without_overflow() {
+        use crate::parser::tx_builder::*;
+        use std::prelude::v1::*;
+
+        // Two base outputs with 64 addresses each put the start of the last
+        // range at item 137. The last arm was sized with the total item
+        // count, and match_ranges! added the two in u8, so rendering item 137
+        // panicked with "attempt to add with overflow".
+        let many: Vec<[u8; 20]> = (0..64u8).map(|i| [i; 20]).collect();
+        let outs = [
+            transferable(&FUJI_AVAX, secp_out(1_000, 0, 1, &many)),
+            transferable(&FUJI_AVAX, secp_out(2_000, 0, 1, &many)),
+        ];
+        let ins = [input(1, &FUJI_AVAX, 1_000_000_000)];
+        let stake = [out(500_000_000, CHANGE)];
+        let data = add_delegator(&outs, &ins, &stake, owners(0, 1, &[CHANGE]));
+
+        let screens = screens(&data, None);
+        assert!(screens.len() > 137);
+        assert!(screens.last().unwrap().starts_with("Fee(AVAX): "));
     }
 }
