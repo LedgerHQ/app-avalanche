@@ -174,10 +174,12 @@ impl<'b> AddDelegatorTx<'b> {
         // stake is defined as an Object List of TransferableOutputs,
         // when parsing transactions we ensure that it is not longer than
         // 64, as we use that value as a limit for the bitwise operation,
-        // this ensures that render ^= 1 << idx never overflows.
+        // this ensures that 1 << idx never overflows.
         self.stake.iterate_with(|o| {
             if o.is_hideable_change(address, avax) {
-                render ^= 1 << idx;
+                // clear the bit: toggling it would show the output
+                // again when a second change path matched it too
+                render &= !(1 << idx);
             }
             idx += 1;
         });
@@ -212,7 +214,7 @@ impl<'b> AddDelegatorTx<'b> {
         // stake is defined as an Object List of TransferableOutputs,
         // when parsing transactions we ensure that it is not longer than
         // 64, as we use that value as a limit for the bitwise operation,
-        // this ensures that render ^= 1 << idx never overflows.
+        // this ensures that 1 << idx never overflows.
         self.stake.iterate_with(|o| {
             let render = self.renderable_out & (1 << idx);
             if render > 0 {
@@ -478,8 +480,8 @@ mod tests {
 
         let honest = screens(&honest, Some(CHANGE));
         let attack = screens(&attack, Some(CHANGE));
-        assert!(!honest.iter().any(|s| s.starts_with("Transfer: ")), "{:#?}", honest);
-        assert!(!honest.iter().any(|s| s.starts_with("Stake: ")), "{:#?}", honest);
+        assert!(!honest.iter().any(|s| s.contains("until")), "{:#?}", honest);
+        assert_ne!(honest, attack);
 
         assert!(attack.contains(&"Transfer: 89.999 AVAX to ".to_string()), "{:#?}", attack);
         assert!(attack.contains(
@@ -487,6 +489,28 @@ mod tests {
         ));
         assert!(attack.contains(&"Stake: 10 AVAX to ".to_string()), "{:#?}", attack);
         assert!(attack.contains(&"Locked until: 2100-01-01 00:00:00 UTC".to_string()));
+    }
+
+    #[test]
+    fn honest_delegation_hides_change_and_stake() {
+        use crate::parser::tx_builder::*;
+        use std::prelude::v1::*;
+
+        // Change and stake both go back to the user. The rule that shows
+        // every output when the filter hid them all is for transfers only;
+        // here it would have re-shown both on every honest delegation.
+        let ins = [input(1, &FUJI_AVAX, 100_000_000_000)];
+        let tx = add_delegator(
+            &[out(89_999_000_000, CHANGE)],
+            &ins,
+            &[out(10_000_000_000, CHANGE)],
+            owners(0, 1, &[CHANGE]),
+        );
+        let shown = screens(&tx, Some(CHANGE));
+        assert!(!shown.iter().any(|s| s.starts_with("Transfer: ")), "{:#?}", shown);
+        assert!(!shown.iter().any(|s| s.starts_with("Stake: ")), "{:#?}", shown);
+        // the amount staked is still on screen
+        assert!(shown.contains(&"Total stake(AVAX): 10".to_string()), "{:#?}", shown);
     }
 
     #[test]

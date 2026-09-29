@@ -27,8 +27,9 @@ use crate::{
     constants::chain_alias_lookup,
     handlers::handle_ui_message,
     parser::{
-        nano_avax_to_fp_str, ChainId, DisplayableItem, FromBytes, Header, ObjectList, OutputIdx,
-        ParserError, TransferableOutput, BLOCKCHAIN_ID_LEN, EVM_EXPORT_TX, U64_FORMATTED_SIZE,
+        nano_avax_to_fp_str, ChainId, DisplayableItem, FromBytes, Header,
+        ObjectList, OutputIdx, ParserError, TransferableOutput, BLOCKCHAIN_ID_LEN, EVM_EXPORT_TX,
+        U64_FORMATTED_SIZE,
     },
 };
 
@@ -122,29 +123,12 @@ impl<'b> FromBytes<'b> for ExportTx<'b> {
 impl<'b> ExportTx<'b> {
     pub const TYPE_ID: u32 = EVM_EXPORT_TX;
 
-    pub fn disable_output_if(&mut self, address: &[u8]) {
-        let num_outs = self.outputs.iter().count();
-        // skip filtering out outputs if there is only one
-        if num_outs <= 1 {
-            return;
-        }
-
-        let mut idx = 0;
-        let mut render = self.renderable_out;
-        let avax = self.tx_header.avax_asset_id();
-
-        // outputs is define as an Object List of TransferableOutputs,
-        // when parsing transactions we ensure that it is not longer than
-        // 64, as we use that value as a limit for the bitwise operation,
-        // this ensures that render ^= 1 << idx never overflows.
-        self.outputs.iterate_with(|o| {
-            if o.is_hideable_change(address, avax) {
-                render ^= 1 << idx;
-            }
-            idx += 1;
-        });
-        self.renderable_out = render;
-    }
+    // No disable_output_if here on purpose, as in ImportTx. The C-chain
+    // side is account based, so an export has no change; an exported output
+    // matching a change path is funds sent to X/P under a key derived from
+    // the signing root, which for Core is the 44'/60' EVM root, and this app
+    // refuses X/P transactions under that root, so the user could not spend
+    // it with this device. Nothing may be hidden.
 
     fn fee(&self) -> Result<u64, ParserError> {
         let inputs = self.sum_inputs_amount()?;
@@ -196,7 +180,7 @@ impl<'b> ExportTx<'b> {
         // outputs is defined as an Object List of TransferableOutputs,
         // when parsing transactions we ensure that it is not longer than
         // 64, as we use that value as a limit for the bitwise operation,
-        // this ensures that render ^= 1 << idx never overflows.
+        // this ensures that 1 << idx never overflows.
         self.outputs.iterate_with(|o| {
             let render = self.renderable_out & (1 << idx);
             if render > 0 {
@@ -340,6 +324,48 @@ impl DisplayableItem for ExportTx<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exported_outputs_are_never_hidden_as_change() {
+        use crate::parser::Transaction;
+        use std::prelude::v1::*;
+
+        // An exported output to hash160 of 44'/60'/0'/{0,1}/i matched the
+        // change filter and was hidden, although it lands on X/P under a key
+        // this app will not sign X/P transactions with.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/parser/testvectors/c_export_to_x.json"
+        );
+        let mut data: Vec<u8> =
+            serde_json::from_reader(std::fs::File::open(path).unwrap()).unwrap();
+
+        // The vector's single exported output is the last thing in it. Add a
+        // second one to another address, so neither the single-output
+        // shortcut nor the show-everything rule can mask a hidden output.
+        let at = data
+            .windows(32)
+            .rposition(|w| w == crate::parser::AVAX_ASSET_ID_LOCAL)
+            .unwrap();
+        assert_eq!(data[at - 4..at], 1u32.to_be_bytes());
+        data[at - 4..at].copy_from_slice(&2u32.to_be_bytes());
+        let mut output = data[at..].to_vec();
+        let len = output.len();
+        output[len - 20..].copy_from_slice(&[0xa5; 20]);
+        data.extend(output);
+
+        let mut tx = Transaction::new(&data).unwrap();
+        let unfiltered = DisplayableItem::num_items(&tx).unwrap();
+        let Transaction::CExport(export) = &tx else {
+            panic!("not a CExport")
+        };
+        let first = export.outputs.iter().next().unwrap();
+        let address = *first.output().get_address(0).unwrap().raw_address();
+
+        tx.disable_output_if(&address);
+        tx.show_outputs_if_all_hidden();
+        assert_eq!(DisplayableItem::num_items(&tx).unwrap(), unfiltered);
+    }
 
     #[test]
     fn non_avax_assets_are_rejected() {

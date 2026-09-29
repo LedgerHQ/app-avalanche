@@ -24,9 +24,9 @@ use crate::{
     constants::chain_alias_lookup,
     handlers::handle_ui_message,
     parser::{
-        sum_amounts_in, BaseTxFields, ChainId, DisplayableItem, FromBytes, Header, ObjectList,
-        Output, OutputIdx, OutputLock, ParserError, TransferableInput, TransferableOutput,
-        BLOCKCHAIN_ID_LEN,
+        output_visibility, sum_amounts_in, BaseTxFields, ChainId, DisplayableItem, FromBytes,
+        Header, ObjectList, Output, OutputIdx, OutputLock, ParserError, TransferableInput,
+        TransferableOutput, BLOCKCHAIN_ID_LEN,
     },
 };
 
@@ -109,6 +109,19 @@ impl<'b, O> BaseExport<'b, O>
 where
     O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
+    /// (visible, total) outputs, base and exported, left by the change filter
+    pub fn output_visibility(&self) -> (usize, usize) {
+        let (visible, total) = self.base_tx.output_visibility();
+        let (export_visible, export_total) = output_visibility(&self.outputs, self.renderable_out);
+        (visible + export_visible, total + export_total)
+    }
+
+    /// Undo the change filter on every output
+    pub fn show_all_outputs(&mut self) {
+        self.base_tx.show_all_outputs();
+        self.renderable_out = OutputIdx::MAX;
+    }
+
     pub fn disable_output_if(&mut self, address: &[u8]) {
         self.base_tx.disable_output_if(address);
 
@@ -125,10 +138,12 @@ where
         // outputs is defined as an Object List of TransferableOutputs,
         // when parsing transactions we ensure that it is not longer than
         // 64, as we use that value as a limit for the bitwise operation,
-        // this ensures that render ^= 1 << idx never overflows.
+        // this ensures that 1 << idx never overflows.
         self.outputs.iterate_with(|o| {
             if o.is_hideable_change(address, avax) {
-                render ^= 1 << idx;
+                // clear the bit: toggling it would show the output
+                // again when a second change path matched it too
+                render &= !(1 << idx);
             }
             idx += 1;
         });
@@ -186,7 +201,7 @@ where
         // outputs is defined as an Object List of TransferableOutputs,
         // when parsing transactions we ensure that it is not longer than
         // 64, as we use that value as a limit for the bitwise operation,
-        // this ensures that render ^= 1 << idx never overflows.
+        // this ensures that 1 << idx never overflows.
         self.outputs.iterate_with(|o| {
             let render = self.renderable_out & (1 << idx);
             if render > 0 {

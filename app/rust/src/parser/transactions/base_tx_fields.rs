@@ -27,6 +27,27 @@ use crate::parser::{
 
 pub const MAX_MEMO_LEN: usize = 256;
 
+/// How many of the outputs in `list` the change filter left visible in
+/// `mask`, and how many there are: (visible, total).
+pub fn output_visibility<'b, T>(list: &ObjectList<'b, T>, mask: OutputIdx) -> (usize, usize)
+where
+    T: FromBytes<'b> + 'b,
+{
+    let mut total = 0usize;
+    let mut visible = 0usize;
+
+    // output lists are capped at OutputIdx::BITS entries when parsed, so
+    // the shift never overflows
+    list.iterate_with(|_| {
+        if mask & (1 << total) != 0 {
+            visible += 1;
+        }
+        total += 1;
+    });
+
+    (visible, total)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, derive(Debug))]
 pub struct BaseTxFields<'b, O>
@@ -59,6 +80,16 @@ where
         NetworkId::try_from(self.network_id).ok()?.avax_asset_id()
     }
 
+    /// (visible, total) base outputs, see output_visibility
+    pub fn output_visibility(&self) -> (usize, usize) {
+        output_visibility(&self.outputs, self.renderable_out)
+    }
+
+    /// Undo the change filter on the base outputs
+    pub fn show_all_outputs(&mut self) {
+        self.renderable_out = OutputIdx::MAX;
+    }
+
     pub fn disable_output_if(&mut self, address: &[u8]) {
         // skip filtering out outputs if there is only one
         let num_outs = self.outputs.iter().count();
@@ -79,10 +110,12 @@ where
         // outputs is define as an Object List of TransferableOutputs,
         // when parsing transactions we ensure that it is not longer than
         // 64, as we use that value as a limit for the bitwise operation,
-        // this ensures that render ^= 1 << idx never overflows.
+        // this ensures that 1 << idx never overflows.
         self.outputs.iterate_with(|o| {
             if o.is_hideable_change(address, avax) {
-                render ^= 1 << idx;
+                // clear the bit: toggling it would show the output
+                // again when a second change path matched it too
+                render &= !(1 << idx);
             }
             idx += 1;
         });
@@ -119,7 +152,7 @@ where
         // outputs is defined as an Object List of TransferableOutputs,
         // when parsing transactions we ensure that it is not longer than
         // 64, as we use that value as a limit for the bitwise operation,
-        // this ensures that render ^= 1 << idx never overflows.
+        // this ensures that 1 << idx never overflows.
         self.outputs.iterate_with(|o| {
             let render = self.renderable_out & (1 << idx);
             if render > 0 {
@@ -294,6 +327,39 @@ mod tests {
         );
         let shown = screens(&tx, Some(CHANGE));
         assert!(!shown.iter().any(|s| s.contains("89.999")), "{:#?}", shown);
+    }
+
+    #[test]
+    fn change_filter_never_hides_every_output() {
+        // Everything going to the user's own change paths used to leave a
+        // review with no output at all.
+        const CHANGE_2: [u8; 20] = [0x08; 20];
+        let tx = x_transfer(
+            &[out(10_000_000_000, CHANGE), out(89_999_000_000, CHANGE_2)],
+            &ins(),
+        );
+        let shown = screens_with_change(&tx, &[CHANGE, CHANGE_2]);
+        assert!(shown.contains(&"Transfer: 10 AVAX to ".to_string()), "{:#?}", shown);
+        assert!(shown.contains(&"Transfer: 89.999 AVAX to ".to_string()), "{:#?}", shown);
+
+        // one of them alone is still hidden
+        let shown = screens_with_change(&tx, &[CHANGE]);
+        assert!(!shown.contains(&"Transfer: 10 AVAX to ".to_string()), "{:#?}", shown);
+    }
+
+    #[test]
+    fn repeated_change_path_keeps_the_output_hidden() {
+        // The filter toggled the output's bit, so a change path sent twice
+        // made the change visible again, and one sent three times hid it.
+        let tx = x_transfer(
+            &[out(10_000_000_000, RECIPIENT), out(89_999_000_000, CHANGE)],
+            &ins(),
+        );
+        for times in 1..=3 {
+            let change = std::vec![CHANGE; times];
+            let shown = screens_with_change(&tx, &change);
+            assert!(!shown.iter().any(|s| s.contains("89.999")), "{} times: {:#?}", times, shown);
+        }
     }
 
     #[test]

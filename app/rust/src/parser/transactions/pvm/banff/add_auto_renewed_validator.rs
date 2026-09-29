@@ -220,7 +220,9 @@ impl<'b> AddAutoRenewedValidatorTx<'b> {
 
         self.stake.iterate_with(|o| {
             if o.is_hideable_change(address, avax) {
-                render ^= 1 << idx;
+                // clear the bit: toggling it would show the output
+                // again when a second change path matched it too
+                render &= !(1 << idx);
             }
             idx += 1;
         });

@@ -206,9 +206,16 @@ pub fn render_all<T: DisplayableItem>(item: &T) -> Vec<String> {
 /// Parse `data` as a transaction, apply the change filter for `change` if
 /// given, and render every screen.
 pub fn screens(data: &[u8], change: Option<[u8; 20]>) -> Vec<String> {
+    screens_with_change(data, change.as_slice())
+}
+
+/// Same as `screens`, filtering every change address in `change` the way
+/// the signing handler does.
+pub fn screens_with_change(data: &[u8], change: &[[u8; 20]]) -> Vec<String> {
     let mut tx = Transaction::new(data).expect("transaction parses");
-    if let Some(change) = change {
-        tx.disable_output_if(&change);
+    for address in change {
+        tx.disable_output_if(address);
     }
+    tx.show_outputs_if_all_hidden();
     render_all(&tx)
 }

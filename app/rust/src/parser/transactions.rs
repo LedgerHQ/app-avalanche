@@ -30,7 +30,7 @@ mod tx_header;
 
 pub use base_export::BaseExport;
 pub use base_import::BaseImport;
-pub use base_tx_fields::BaseTxFields;
+pub use base_tx_fields::{output_visibility, BaseTxFields};
 pub use transfer::Transfer;
 pub use tx_header::{Header, BLOCKCHAIN_ID_LEN};
 
@@ -295,8 +295,8 @@ impl<'b> Transaction<'b> {
             // CImport is deliberately absent: its outputs are EVM addresses,
             // which are a different construction from the AVAX key hash this
             // filter matches on, so a match can only ever be contrived. See
-            // coreth/import_tx.rs.
-            Self::CExport(tx) => tx.disable_output_if(address),
+            // coreth/import_tx.rs. CExport too: an export has no change, see
+            // coreth/export_tx.rs.
             Self::PBase(tx) => tx.disable_output_if(address),
             #[cfg(feature = "add-validator")]
             Self::Validator(tx) => tx.disable_output_if(address),
@@ -336,7 +336,7 @@ impl<'b> Transaction<'b> {
             Self::IncreaseL1ValidatorBalance(tx) => tx.disable_output_if(address),
             #[cfg(feature = "banff")]
             Self::SetAutoRenewedValidatorConfig(tx) => tx.disable_output_if(address),
-            // CImport is the only type left without an arm; see above.
+            // CImport and CExport are the only types without an arm; see above.
             _ => {}
         }
     }
@@ -551,6 +551,49 @@ impl<'b> Transaction<'b> {
             }
             #[cfg(feature = "banff")]
             Self::SetAutoRenewedValidatorConfig(tx) => base(&tx.base_tx, f),
+        }
+    }
+
+    /// Run after the change filter has been applied for every change path:
+    /// if it hid every output of a transfer, show them all again.
+    ///
+    /// A transfer, import or export whose outputs all go back to the user's
+    /// own paths would otherwise review with no output at all, and nothing
+    /// would tell the user where the funds went. Staking, subnet, L1 and
+    /// operation transactions are left alone: their purpose is on screen
+    /// anyway, and an honest delegation, whose change and stake both return
+    /// to the user, would otherwise always show every output.
+    pub fn show_outputs_if_all_hidden(&mut self) {
+        let (visible, total) = self.output_visibility();
+        if total > 0 && visible == 0 {
+            self.show_all_outputs();
+        }
+    }
+
+    // (visible, total) outputs of the transfer types the rule above applies
+    // to, (0, 0) for every other type
+    fn output_visibility(&self) -> (usize, usize) {
+        match self {
+            Self::Transfer(tx) => tx.base.output_visibility(),
+            Self::PBase(tx) => tx.base.output_visibility(),
+            Self::XImport(tx) => tx.0.base_tx.output_visibility(),
+            Self::PImport(tx) => tx.0.base_tx.output_visibility(),
+            Self::XExport(tx) => tx.0.output_visibility(),
+            Self::PExport(tx) => tx.0.output_visibility(),
+            // CImport and CExport are not filtered at all
+            _ => (0, 0),
+        }
+    }
+
+    fn show_all_outputs(&mut self) {
+        match self {
+            Self::Transfer(tx) => tx.base.show_all_outputs(),
+            Self::PBase(tx) => tx.base.show_all_outputs(),
+            Self::XImport(tx) => tx.0.base_tx.show_all_outputs(),
+            Self::PImport(tx) => tx.0.base_tx.show_all_outputs(),
+            Self::XExport(tx) => tx.0.show_all_outputs(),
+            Self::PExport(tx) => tx.0.show_all_outputs(),
+            _ => {}
         }
     }
 

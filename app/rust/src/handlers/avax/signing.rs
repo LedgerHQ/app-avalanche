@@ -111,6 +111,10 @@ impl Sign {
 
             tx.disable_output_if(&address[..]);
         }
+
+        // never leave the review without a single output
+        tx.show_outputs_if_all_hidden();
+
         Ok(())
     }
 
