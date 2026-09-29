@@ -149,6 +149,7 @@ impl<'b> FromBytes<'b> for ConvertSubnetToL1Tx<'b> {
 
         unsafe {
             addr_of_mut!((*out).address).write(address);
+            addr_of_mut!((*out).address_len).write(address_len);
         }
 
         Ok(rem)
@@ -355,6 +356,23 @@ mod tests {
             assert!(tx
                 .render_item(u8::MAX, &mut title, &mut message, 0)
                 .is_err());
+        }
+    }
+
+    #[test]
+    fn every_field_is_initialised() {
+        for data in [SIMPLE_CONVERT_SUBNET, COMPLEX_CONVERT_SUBNET] {
+            // garbage stands in for uninitialised memory
+            let mut out = MaybeUninit::<ConvertSubnetToL1Tx>::uninit();
+            unsafe {
+                out.as_mut_ptr()
+                    .cast::<u8>()
+                    .write_bytes(0xFF, core::mem::size_of::<ConvertSubnetToL1Tx>());
+            }
+            ConvertSubnetToL1Tx::from_bytes_into(data, &mut out).unwrap();
+            let tx = unsafe { out.assume_init() };
+
+            assert_eq!(tx.address_len as usize, tx.address.len());
         }
     }
 }

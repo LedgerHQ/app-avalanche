@@ -102,13 +102,43 @@ impl<'b> FromBytes<'b> for NftInfo {
         _ = OwnedAddress::from_bytes_into(address, owned)?;
 
         unsafe {
-            let collection_name = &mut *addr_of_mut!((*out).collection_name);
-            collection_name[..name.len()].copy_from_slice(name);
+            // zero the whole array, not only the name, before it is assumed init
+            let collection_name = addr_of_mut!((*out).collection_name).cast::<u8>();
+            collection_name.write_bytes(0, COLLECTION_NAME_MAX_LEN + 1);
+            collection_name.copy_from_nonoverlapping(name.as_ptr(), name.len());
 
             addr_of_mut!((*out).name_len).write(name_len as u8);
             addr_of_mut!((*out).chain_id).write(chain_id);
         }
 
         Ok(rem)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::prelude::v1::*;
+
+    #[test]
+    fn collection_name_is_fully_initialised() {
+        let name = b"Collection";
+        let mut data = std::vec![0u8, 1, name.len() as u8];
+        data.extend_from_slice(name);
+        data.extend_from_slice(&[0x11; ADDRESS_LEN]);
+        data.extend_from_slice(&43114u64.to_be_bytes());
+
+        // garbage stands in for uninitialised memory
+        let mut out = MaybeUninit::<NftInfo>::uninit();
+        unsafe {
+            out.as_mut_ptr()
+                .cast::<u8>()
+                .write_bytes(0xFF, core::mem::size_of::<NftInfo>());
+        }
+        NftInfo::from_bytes_into(&data, &mut out).unwrap();
+        let info = unsafe { out.assume_init() };
+
+        assert_eq!(&info.collection_name[..name.len()], name);
+        assert!(info.collection_name[name.len()..].iter().all(|b| *b == 0));
     }
 }
