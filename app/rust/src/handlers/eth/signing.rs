@@ -279,8 +279,31 @@ impl Sign {
         Ok(())
     }
 
+    /// Drop all the state of a streamed transaction
+    fn reset_streaming() {
+        unsafe {
+            *crate::lock_mut!(STREAMING_MODE).lock(StreamingAccessors::EthSign) = false;
+            crate::lock_mut!(STREAMING_HASHER)
+                .lock(StreamingAccessors::EthSign)
+                .take();
+            let _ = crate::lock_mut!(STREAMING_HASHER).release(StreamingAccessors::EthSign);
+            *crate::lock_mut!(EXPECTED_BYTES).lock(StreamingAccessors::EthSign) = 0;
+            *crate::lock_mut!(RECEIVED_BYTES).lock(StreamingAccessors::EthSign) = 0;
+            *crate::lock_mut!(STREAMING_TX_TYPE).lock(StreamingAccessors::EthSign) = false;
+            *crate::lock_mut!(STREAMING_CHAIN_ID).lock(StreamingAccessors::EthSign) = None;
+            *crate::lock_mut!(IS_LEGACY_TX).lock(StreamingAccessors::EthSign) = false;
+            *crate::lock_mut!(LAST_PACKET).lock(StreamingAccessors::EthSign) = None;
+            *crate::lock_mut!(SECOND_LAST_PACKET).lock(StreamingAccessors::EthSign) = None;
+        }
+    }
+
     #[inline(never)]
     fn finalize_streaming_hash() -> Result<(), ParserError> {
+        // The setting may have been turned off while the chunks were streamed
+        if !is_app_mode_blind_sign() {
+            return Err(ParserError::BlindSignNotEnabled);
+        }
+
         let hasher = unsafe {
             crate::lock_mut!(STREAMING_HASHER)
                 .acquire(StreamingAccessors::EthSign)
@@ -374,17 +397,7 @@ impl Sign {
         }
 
         // Clean up streaming state
-        unsafe {
-            *crate::lock_mut!(STREAMING_MODE).lock(StreamingAccessors::EthSign) = false;
-            let _ = crate::lock_mut!(STREAMING_HASHER).release(StreamingAccessors::EthSign);
-            *crate::lock_mut!(EXPECTED_BYTES).lock(StreamingAccessors::EthSign) = 0;
-            *crate::lock_mut!(RECEIVED_BYTES).lock(StreamingAccessors::EthSign) = 0;
-
-            // Clean up legacy-specific resources
-            *crate::lock_mut!(IS_LEGACY_TX).lock(StreamingAccessors::EthSign) = false;
-            *crate::lock_mut!(LAST_PACKET).lock(StreamingAccessors::EthSign) = None;
-            *crate::lock_mut!(SECOND_LAST_PACKET).lock(StreamingAccessors::EthSign) = None;
-        }
+        Self::reset_streaming();
 
         // Return Ok - the hash has been computed successfully
         // and SignUI has been created for blind signing
@@ -394,6 +407,18 @@ impl Sign {
     pub fn parse(buffer: ApduBufferRead<'_>) -> Result<bool, ParserError> {
         crate::zlog("EthSign::parse\x00");
 
+        let res = Self::parse_packet(buffer);
+
+        // A refused packet ends the session: nothing it started may carry
+        // over into the next request
+        if res.is_err() {
+            let _ = cleanup_globals();
+        }
+
+        res
+    }
+
+    fn parse_packet(buffer: ApduBufferRead<'_>) -> Result<bool, ParserError> {
         // hw-app-eth encodes the packet type in p1
         // with 0x00 being init and 0x80 being next
         //
@@ -410,6 +435,13 @@ impl Sign {
         match packet_type {
             //init
             0x00 => {
+                // A new request starts from a clean state, whatever an
+                // abandoned or failed session left behind
+                Self::reset_streaming();
+                unsafe {
+                    crate::lock_mut!(ETH_UI).lock(EthAccessors::Tx).take();
+                }
+
                 let payload = buffer.payload().map_err(|_| ParserError::NoData)?;
                 //parse path to verify it's the data we expect
                 let (rest, bip32_path) =
@@ -875,10 +907,7 @@ pub fn cleanup_globals() -> Result<(), Error> {
             let _ = crate::lock_mut!(BUFFER).release(Sign);
         }
 
-        // Reset streaming metadata
-        use crate::handlers::resources::{STREAMING_CHAIN_ID, STREAMING_TX_TYPE};
-        *crate::lock_mut!(STREAMING_TX_TYPE).lock(StreamingAccessors::EthSign) = false;
-        *crate::lock_mut!(STREAMING_CHAIN_ID).lock(StreamingAccessors::EthSign) = None;
+        Sign::reset_streaming();
 
         // Forcefully acquire the resource as it is not longer in use
         // transaction was rejected.
@@ -1229,6 +1258,52 @@ mod session_tests {
         assert_eq!(send_tx(&eip1559(AVAX_C_CHAIN_MAINNET_ID, 10)), Ok(true));
         unsafe { crate::ffi::sign_hash::_clean_up_eth() };
         assert!(!stored());
+        reset();
+    }
+
+    // AVAX-18: an abandoned stream must not capture the chunks of the next
+    // multi-chunk transaction.
+    #[test]
+    #[file_serial(path)]
+    fn init_resets_abandoned_stream() {
+        reset();
+
+        let big = eip1559(AVAX_C_CHAIN_MAINNET_ID, Sign::BUFFER_CAPACITY + 100);
+        let (res, _) = send_init(&big);
+        assert_eq!(res, Ok(false));
+
+        // normal-size tx that needs a few chunks
+        let small = eip1559(AVAX_C_CHAIN_MAINNET_ID, 600);
+        assert_eq!(send_tx(&small), Ok(true));
+        assert!(!unsafe { rs_eth_was_streaming_mode_used() });
+        assert_eq!(ui_hash(), keccak(&small));
+        reset();
+    }
+
+    // AVAX-18: blind signing turned off while a stream is in flight must
+    // stop it from being reviewed.
+    #[test]
+    #[file_serial(path)]
+    fn stream_rechecks_blind_sign_at_finalize() {
+        reset();
+
+        let big = eip1559(AVAX_C_CHAIN_MAINNET_ID, Sign::BUFFER_CAPACITY + 100);
+        let (res, rest) = send_init(&big);
+        assert_eq!(res, Ok(false));
+
+        crate::utils::set_blind_sign_for_test(false);
+        let mut res = Ok(false);
+        for chunk in rest.chunks(255) {
+            res = apdu(0x80, chunk);
+            if res.is_err() {
+                break;
+            }
+        }
+        crate::utils::set_blind_sign_for_test(true);
+
+        assert_eq!(res, Err(ParserError::BlindSignNotEnabled));
+        assert!(!unsafe { rs_eth_was_streaming_mode_used() });
+        assert!(!unsafe { *crate::lock_mut!(STREAMING_MODE).lock(StreamingAccessors::EthSign) });
         reset();
     }
 }
