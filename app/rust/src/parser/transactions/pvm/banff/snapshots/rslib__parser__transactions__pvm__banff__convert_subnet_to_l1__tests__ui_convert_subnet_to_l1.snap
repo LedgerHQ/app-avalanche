@@ -1,6 +1,5 @@
 ---
 source: src/parser/transactions/pvm/banff/convert_subnet_to_l1.rs
-assertion_line: 259
 expression: reduced
 ---
 [

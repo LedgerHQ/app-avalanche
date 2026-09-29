@@ -123,3 +123,33 @@ impl TryFrom<(u32, &[u8; BLOCKCHAIN_ID_LEN])> for NetworkInfo {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::AssetId;
+    use core::mem::MaybeUninit;
+    use std::prelude::v1::*;
+
+    #[test]
+    fn avax_asset_ids_match_avalanchego() {
+        // genesis TestAVAXAssetID in avalanchego
+        for (network, expected) in [
+            (NetworkId::Mainnet, "FvwEAhmxKfeiG8SnEvq42hc6whRyY3EFYAvebMqDNDGCgxN5Z"),
+            (NetworkId::Fuji, "U8iRqJoiJm8xZHAacmvYyZVwqQx6uDNtQeP3CQ6fcgQk3JqnK"),
+            (NetworkId::Local, "2fombhL7aGPwj3KH4bfrmJwW6PVnMobf9Y2fn9GwxiAAJyFDbe"),
+        ] {
+            let id = network.avax_asset_id().expect("known network");
+            let mut asset = MaybeUninit::uninit();
+            AssetId::from_bytes_into(&id[..], &mut asset).unwrap();
+            let asset = unsafe { asset.assume_init() };
+
+            let mut encoded = [0; crate::parser::asset_id::ASSET_ID_CB58_MAX_LEN];
+            let len = asset.cb58_into(&mut encoded).unwrap();
+            assert_eq!(core::str::from_utf8(&encoded[..len]).unwrap(), expected);
+        }
+
+        assert!(NetworkId::Custom.avax_asset_id().is_none());
+        assert!(NetworkId::Devnet.avax_asset_id().is_none());
+    }
+}

@@ -22,7 +22,7 @@ use crate::{
     checked_add,
     handlers::handle_ui_message,
     parser::{
-        intstr_to_fpstr_inplace, nano_avax_to_fp_str, u64_to_str, BaseTxFields, DisplayableItem,
+        intstr_to_fpstr_inplace, nano_avax_to_fp_str, u64_to_str, sum_amounts_in, BaseTxFields, DisplayableItem,
         FromBytes, Header, ObjectList, OutputIdx, ParserError, PvmOutput, SECPOutputOwners, Stake,
         TransferableOutput, Validator, DELEGATION_FEE_DIGITS, PVM_ADD_VALIDATOR, U64_FORMATTED_SIZE
     },
@@ -201,7 +201,8 @@ impl<'b> AddValidatorTx<'b> {
         let sum_inputs = self.base_tx.sum_inputs_amount()?;
 
         let base_outputs = self.base_tx.sum_outputs_amount()?;
-        let stake_outputs = Self::sum_stake_outputs_amount(&self.stake)?;
+        // AVAX only, as the fee is paid in AVAX
+        let stake_outputs = sum_amounts_in(&self.stake, self.tx_header.avax_asset_id())?;
 
         let total_outputs = base_outputs
             .checked_add(stake_outputs)
@@ -300,33 +301,17 @@ impl<'b> AddValidatorTx<'b> {
         //  Funds locked:
         //      0.5 AVAX until 2021-05-31 21:28:00 UTC
 
-        // get the number of items for the obj wrapped up by PvmOutput
-        let num_inner_items = obj.output.num_inner_items()?;
+        let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+        let avax = self.tx_header.avax_asset_id();
+        let res = obj.render_item_with_hrp(hrp, avax, item_n, title, message, page);
 
-        // do a custom rendering of the first base_output_items
-        match item_n {
-            0 => {
-                title[..header.len()].copy_from_slice(header);
-
-                // render using default obj impl
-                let res = obj.render_item(0, title, message, page);
-
-                // customize the label
-                title.iter_mut().for_each(|v| *v = 0);
-                title[..header.len()].copy_from_slice(header);
-
-                res
-            }
-            // addresses, then the threshold when there are several
-            x @ 1.. if x < num_inner_items => {
-                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
-                obj.render_item_with_hrp(hrp, x, title, message, page)
-            }
-            // by default we call the objects impl here,
-            // if it is a locked output, that info will be shown otherwise,
-            // this returns an error
-            _ => obj.render_item(item_n, title, message, page),
+        // 'Transfer' or 'Stake' instead of 'Amount'
+        if item_n == 0 {
+            title.iter_mut().for_each(|v| *v = 0);
+            title[..header.len()].copy_from_slice(header);
         }
+
+        res
     }
 
     fn sum_stake_outputs_amount(

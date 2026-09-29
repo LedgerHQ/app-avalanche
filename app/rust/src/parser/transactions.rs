@@ -41,9 +41,11 @@ use crate::checked_add;
 use crate::handlers::handle_ui_message;
 use crate::parser::transactions::base_tx_fields::MAX_MEMO_LEN;
 use crate::parser::{
-    DisplayableItem, ExportTx as EvmExport, ImportTx as EvmImport, EVM_IMPORT_TX,
-    PVM_BASE_TX_TRANSFER, PVM_EXPORT_TX, PVM_IMPORT_TX,
+    DisplayableItem, ExportTx as EvmExport, ImportTx as EvmImport, ObjectList, Output,
+    OutputLock, TransferableInput, TransferableOutput, EVM_IMPORT_TX, PVM_BASE_TX_TRANSFER,
+    PVM_EXPORT_TX, PVM_IMPORT_TX,
 };
+use core::ops::Deref;
 use crate::utils::hex_encode;
 pub use avm::{AvmExportTx, AvmImportTx, OperationTx};
 pub use pvm::{PvmExportTx, PvmImportTx};
@@ -266,6 +268,10 @@ impl<'b> Transaction<'b> {
         }
         let rem = Self::parse(rem, this)?;
 
+        // SAFETY: parse initialized it
+        let tx = unsafe { this.assume_init_ref() };
+        tx.check_non_avax_flows()?;
+
         // The P/X/C-chain unsigned transaction wire format is
         // `CodecID + UnsignedTx`. Credentials belong to the SignedTx wrapper
         // and must not be present in the bytes that the device hashes — the
@@ -332,6 +338,219 @@ impl<'b> Transaction<'b> {
             Self::SetAutoRenewedValidatorConfig(tx) => tx.disable_output_if(address),
             // CImport is the only type left without an arm; see above.
             _ => {}
+        }
+    }
+
+    /// Refuse a transaction that burns an asset other than AVAX.
+    ///
+    /// Inputs are not reviewed and the fee only counts AVAX, so for any other
+    /// asset what the transaction consumes must be exactly what it produces:
+    /// avalanchego burns any excess, and 1e12 units of a token spent into a
+    /// transaction with only AVAX outputs reviewed like a plain AVAX transfer.
+    /// The one legitimate burn, TransformSubnet's reward pool, is allowed.
+    /// Only checked where the network's AVAX asset id is known.
+    fn check_non_avax_flows(&self) -> Result<(), ParserError> {
+        let Some(avax) = self.avax_asset_id() else {
+            return Ok(());
+        };
+
+        let mut result = Ok(());
+        self.visit_flows(&mut |_, asset, _| {
+            if result.is_err() || asset == *avax {
+                return;
+            }
+
+            // consumed and produced amounts of this asset, over every list
+            let (mut consumed, mut produced) = (0u128, 0u128);
+            self.visit_flows(&mut |is_input, other, amount| {
+                if other == asset {
+                    if is_input {
+                        consumed += amount as u128;
+                    } else {
+                        produced += amount as u128;
+                    }
+                }
+            });
+
+            #[cfg(feature = "banff")]
+            if let Self::TransformSubnet(tx) = self {
+                let (reward_asset, burn) = tx.reward_burn();
+                if *reward_asset == asset {
+                    produced += burn as u128;
+                }
+            }
+
+            if consumed != produced {
+                result = Err(ParserError::UnexpectedType);
+            }
+        });
+        result
+    }
+
+    // the AVAX asset id on the transaction's network, if known
+    fn avax_asset_id(&self) -> Option<&'static [u8; 32]> {
+        match self {
+            Self::XImport(tx) => tx.0.base_tx.avax_asset_id(),
+            Self::XExport(tx) => tx.0.base_tx.avax_asset_id(),
+            Self::XOperation(tx) => tx.base_tx.avax_asset_id(),
+            Self::PImport(tx) => tx.0.base_tx.avax_asset_id(),
+            Self::PExport(tx) => tx.0.base_tx.avax_asset_id(),
+            Self::CImport(tx) => tx.tx_header.avax_asset_id(),
+            Self::CExport(tx) => tx.tx_header.avax_asset_id(),
+            Self::Transfer(tx) => tx.base.avax_asset_id(),
+            Self::PBase(tx) => tx.base.avax_asset_id(),
+            #[cfg(feature = "create-asset")]
+            Self::XAsset(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "add-validator")]
+            Self::Validator(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "add-delegator")]
+            Self::Delegator(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "create-chain")]
+            Self::CreateChain(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "create-subnet")]
+            Self::CreateSubnet(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "add-subnet-validator")]
+            Self::SubnetValidator(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::RemoveSubnetValidator(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::TransformSubnet(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::PermissionlessValidator(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::PermissionlessDelegator(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::ConvertSubnetToL1(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::RegisterL1Validator(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::SetL1ValidatorWeight(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::DisableL1Validator(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::IncreaseL1ValidatorBalance(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::AutoRenewedValidator(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::SetAutoRenewedValidatorConfig(tx) => tx.base_tx.avax_asset_id(),
+        }
+    }
+
+    /// Call `f(is_input, asset, amount)` for every fungible input and output
+    /// of the transaction: base inputs and outputs, and the imported, exported
+    /// and stake lists where the type has them. NFT and mint outputs carry no
+    /// amount and are skipped.
+    fn visit_flows(&self, f: &mut dyn FnMut(bool, [u8; 32], u64)) {
+        fn ins(list: &ObjectList<'_, TransferableInput<'_>>, f: &mut dyn FnMut(bool, [u8; 32], u64)) {
+            list.iterate_with(|i| {
+                if let Some(amount) = i.amount() {
+                    f(true, *i.asset_id().id(), amount)
+                }
+            });
+        }
+        fn outs<'b, O>(list: &ObjectList<'b, TransferableOutput<'b, O>>, f: &mut dyn FnMut(bool, [u8; 32], u64))
+        where
+            O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
+        {
+            list.iterate_with(|o| {
+                if let Some(amount) = o.amount() {
+                    f(false, *o.asset_id().id(), amount)
+                }
+            });
+        }
+        fn base<'b, O>(base: &BaseTxFields<'b, O>, f: &mut dyn FnMut(bool, [u8; 32], u64))
+        where
+            O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
+        {
+            ins(&base.inputs, f);
+            outs(&base.outputs, f);
+        }
+
+        match self {
+            Self::XImport(tx) => {
+                base(&tx.0.base_tx, f);
+                ins(&tx.0.inputs, f);
+            }
+            Self::XExport(tx) => {
+                base(&tx.0.base_tx, f);
+                outs(&tx.0.outputs, f);
+            }
+            Self::XOperation(tx) => base(&tx.base_tx, f),
+            Self::PImport(tx) => {
+                base(&tx.0.base_tx, f);
+                ins(&tx.0.inputs, f);
+            }
+            Self::PExport(tx) => {
+                base(&tx.0.base_tx, f);
+                outs(&tx.0.outputs, f);
+            }
+            Self::CImport(tx) => {
+                ins(&tx.inputs, f);
+                tx.outputs.iterate_with(|o| {
+                    if let Some(amount) = o.amount() {
+                        f(false, *o.asset_id().id(), amount)
+                    }
+                });
+            }
+            Self::CExport(tx) => {
+                tx.inputs.iterate_with(|i| {
+                    if let Some(amount) = i.amount() {
+                        f(true, *i.asset_id().id(), amount)
+                    }
+                });
+                outs(&tx.outputs, f);
+            }
+            Self::Transfer(tx) => base(&tx.base, f),
+            Self::PBase(tx) => base(&tx.base, f),
+            #[cfg(feature = "create-asset")]
+            Self::XAsset(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "add-validator")]
+            Self::Validator(tx) => {
+                base(&tx.base_tx, f);
+                outs(&tx.stake, f);
+            }
+            #[cfg(feature = "add-delegator")]
+            Self::Delegator(tx) => {
+                base(&tx.base_tx, f);
+                outs(&tx.stake, f);
+            }
+            #[cfg(feature = "create-chain")]
+            Self::CreateChain(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "create-subnet")]
+            Self::CreateSubnet(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "add-subnet-validator")]
+            Self::SubnetValidator(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "banff")]
+            Self::RemoveSubnetValidator(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "banff")]
+            Self::TransformSubnet(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "banff")]
+            Self::PermissionlessValidator(tx) => {
+                base(&tx.base_tx, f);
+                outs(&tx.stake, f);
+            }
+            #[cfg(feature = "banff")]
+            Self::PermissionlessDelegator(tx) => {
+                base(&tx.base_tx, f);
+                outs(&tx.stake, f);
+            }
+            #[cfg(feature = "banff")]
+            Self::ConvertSubnetToL1(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "banff")]
+            Self::RegisterL1Validator(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "banff")]
+            Self::SetL1ValidatorWeight(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "banff")]
+            Self::DisableL1Validator(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "banff")]
+            Self::IncreaseL1ValidatorBalance(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "banff")]
+            Self::AutoRenewedValidator(tx) => {
+                base(&tx.base_tx, f);
+                outs(&tx.stake, f);
+            }
+            #[cfg(feature = "banff")]
+            Self::SetAutoRenewedValidatorConfig(tx) => base(&tx.base_tx, f),
         }
     }
 
@@ -795,12 +1014,12 @@ mod tests {
     /// Coreth transactions carry no BaseTxFields.
     #[cfg(feature = "full")]
     fn base_output_addresses(tx: &Transaction<'_>, hrp: &str) -> Vec<String> {
-        use crate::parser::{BaseTxFields, FromBytes, Output, MAX_ADDRESS_ENCODED_LEN};
+        use crate::parser::{BaseTxFields, FromBytes, Output, OutputLock, MAX_ADDRESS_ENCODED_LEN};
         use core::ops::Deref;
 
         fn collect<'b, O>(base: &BaseTxFields<'b, O>, hrp: &str, out: &mut Vec<String>)
         where
-            O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+            O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
         {
             base.outputs.iterate_with(|o| {
                 let inner: &Output<'_> = &o.output;

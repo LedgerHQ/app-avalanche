@@ -95,6 +95,19 @@ impl<'b> FromBytes<'b> for ExportTx<'b> {
         let outputs = unsafe { &mut *addr_of_mut!((*this).outputs).cast() };
         let rem = ObjectList::<TransferableOutput<EOutput>>::new_into(rem, outputs)?;
 
+        // Since Banff coreth rejects exports of anything but AVAX
+        // (ErrExportNonAVAXInputBanff, ErrExportNonAVAXOutputBanff). Refuse
+        // them here as well, so every amount shown is AVAX and so is the fee.
+        if let Some(avax) = unsafe { (*header).avax_asset_id() } {
+            let inputs = unsafe { inputs.assume_init_ref() };
+            let outputs = unsafe { outputs.assume_init_ref() };
+            if inputs.iter().any(|i| i.asset_id().id() != avax)
+                || outputs.iter().any(|o| o.asset_id().id() != avax)
+            {
+                return Err(ParserError::UnexpectedType.into());
+            }
+        }
+
         //good ptr and no uninit reads
         unsafe {
             addr_of_mut!((*this).destination_chain).write(destination_chain);
@@ -242,26 +255,12 @@ impl<'b> ExportTx<'b> {
         };
 
         let obj = self.outputs.get_obj_if(filter).ok_or(ViewError::NoData)?;
+        // Import/Export only supports secp_transfer types
+        let _ = obj.output().secp_transfer().ok_or(ViewError::NoData)?;
 
-        // ETH Import/Export only supports secp_transfer types
-        let obj = (*obj).secp_transfer().ok_or(ViewError::NoData)?;
-
-        // get the number of items for Output
-        let num_inner_items = obj.num_items()?;
-
-        // do a custom rendering of the first base_output_items
-        match obj_item_n {
-            0 => {
-                // render amount
-                obj.render_item(0, title, message, page)
-            }
-            // addresses, then the threshold when there are several
-            x @ 1.. if x < num_inner_items => {
-                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
-                obj.render_item_with_hrp(hrp, x, title, message, page)
-            }
-            _ => Err(ViewError::NoData),
-        }
+        let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+        let avax = self.tx_header.avax_asset_id();
+        obj.render_item_with_hrp(hrp, avax, obj_item_n, title, message, page)
     }
 
     fn render_export_description(
@@ -341,6 +340,42 @@ impl DisplayableItem for ExportTx<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_avax_assets_are_rejected() {
+        use crate::parser::{Transaction, AVAX_ASSET_ID_LOCAL};
+        use std::prelude::v1::*;
+
+        // coreth has refused atomic transactions in any asset but AVAX since
+        // Banff, while the review shows these amounts as AVAX. Swap each AVAX
+        // asset id of this local-network vector, in turn, for another asset.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/parser/testvectors/c_export_to_x.json"
+        );
+        let data: Vec<u8> =
+            serde_json::from_reader(std::fs::File::open(path).unwrap()).unwrap();
+        assert!(Transaction::new(&data).is_ok());
+
+        let positions: Vec<usize> = data
+            .windows(32)
+            .enumerate()
+            .filter(|(_, w)| *w == AVAX_ASSET_ID_LOCAL)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(positions.len() >= 2, "an input and an output in AVAX");
+
+        for at in positions {
+            let mut swapped = data.clone();
+            swapped[at..at + 32].copy_from_slice(&[0x5c; 32]);
+            assert_eq!(
+                Transaction::new(&swapped).unwrap_err(),
+                ParserError::UnexpectedType,
+                "asset at {}",
+                at
+            );
+        }
+    }
 
     const DATA: &[u8] = &[
         0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x9d, 0x07, 0x75, 0xf4, 0x50, 0x60, 0x4b,

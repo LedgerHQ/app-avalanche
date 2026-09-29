@@ -67,15 +67,15 @@ pub use coreth::{
 };
 pub use error::ParserError;
 pub use initial_state::InitialState;
-pub use inputs::TransferableInput;
+pub use inputs::{sum_input_amounts_in, TransferableInput};
 pub use message::{AvaxMessage, Message};
 pub use network_info::*;
 pub use node_id::*;
 pub use object_list::ObjectList;
 pub use operations::TransferableOp;
 pub use outputs::{
-    NFTMintOutput, NFTTransferOutput, Output, OutputType, SECPMintOutput, SECPOutputOwners,
-    SECPTransferOutput, TransferableOutput,
+    sum_amounts_in, NFTMintOutput, NFTTransferOutput, Output, OutputLock, OutputType,
+    SECPMintOutput, SECPOutputOwners, SECPTransferOutput, TransferableOutput,
 };
 pub use pchain_owner::PchainOwner;
 pub use pvm_output::PvmOutput;

@@ -15,8 +15,13 @@
 ********************************************************************************/
 use core::ops::Deref;
 
-use crate::parser::{Address, AssetId, DisplayableItem, FromBytes, ParserError};
+use crate::handlers::handle_ui_message;
+use crate::parser::{
+    asset_id::ASSET_ID_CB58_MAX_LEN, nano_avax_to_fp_str, timestamp_to_str_date, u64_to_str,
+    Address, AssetId, DisplayableItem, FromBytes, ObjectList, ParserError, U64_FORMATTED_SIZE,
+};
 use crate::sys::ViewError;
+use arrayvec::ArrayVec;
 use core::{mem::MaybeUninit, ptr::addr_of_mut};
 
 mod nft_mint_output;
@@ -52,6 +57,38 @@ pub(crate) fn render_locktime(
 
     let date = crate::parser::timestamp_to_str_date(locktime).map_err(|_| ViewError::Unknown)?;
     crate::handlers::handle_ui_message(date.as_slice(), message, page)
+}
+
+/// Implemented by the chain-specific wrappers around an Output (AvmOutput,
+/// PvmOutput, EOutput), for what the wrapper adds to it.
+pub trait OutputLock {
+    /// The locktime of the P-chain stakeable lock (stakeable.LockOut) around
+    /// the output, if there is one.
+    fn stakeable_locktime(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// Sum the amounts of the outputs in `asset`, or of all of them when `asset`
+/// is None (a network whose AVAX asset id is not known).
+///
+/// The fee is paid in AVAX, so it must only count AVAX: summing across
+/// assets let one asset's inputs cover another's outputs and made the fee
+/// shown meaningless.
+pub fn sum_amounts_in<'b, O>(
+    outputs: &ObjectList<'b, TransferableOutput<'b, O>>,
+    asset: Option<&[u8; 32]>,
+) -> Result<u64, ParserError>
+where
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
+{
+    outputs
+        .iter()
+        .filter(|output| asset.is_none() || asset == Some(output.asset_id().id()))
+        .map(|output| output.amount().ok_or(ParserError::UnexpectedError))
+        .try_fold(0u64, |acc, x| {
+            acc.checked_add(x?).ok_or(ParserError::OperationOverflows)
+        })
 }
 
 /// Whether an owner set needs a Threshold screen: with a single address the
@@ -99,7 +136,7 @@ pub(crate) fn render_threshold(
 #[cfg_attr(test, derive(Debug))]
 pub struct TransferableOutput<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     asset_id: AssetId<'b>,
     pub output: O,
@@ -107,7 +144,7 @@ where
 
 impl<'b, O> Deref for TransferableOutput<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     type Target = O::Target;
 
@@ -118,7 +155,7 @@ where
 
 impl<'b, O> TransferableOutput<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     pub fn amount(&self) -> Option<u64> {
         (*self.output).amount()
@@ -138,23 +175,90 @@ where
 
     /// Render one counted item of this output, encoding addresses for `hrp`.
     ///
-    /// Items of an inner secp transfer output (addresses, threshold) go
-    /// through its hrp-aware renderer; anything the wrapper adds after them,
-    /// like the locked-funds line of a PvmOutput, through the wrapper's own.
+    /// `avax_asset` is the AVAX asset id of the transaction's network, None
+    /// where it is not known. Only an output of that asset is labelled AVAX;
+    /// any other shows its amount in raw units, since the device does not
+    /// know the asset's denomination, and its asset id in CB58. The asset used
+    /// to be ignored, so swapping it gave exactly the same screens.
+    ///
+    /// Items of an inner secp transfer output (addresses, threshold,
+    /// locktime) go through its hrp-aware renderer, then the stakeable-lock
+    /// line of a locked P-chain output.
     pub fn render_item_with_hrp(
         &self,
         hrp: &str,
+        avax_asset: Option<&[u8; 32]>,
         item_n: u8,
         title: &mut [u8],
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
-        match self.output().secp_transfer() {
-            Some(secp) if item_n < secp.num_items()? => {
-                secp.render_item_with_hrp(hrp, item_n, title, message, page)
+        use bolos::{pic_str, PIC};
+
+        let Some(secp) = self.output().secp_transfer() else {
+            return self.output.render_item(item_n, title, message, page);
+        };
+        let inner_items = secp.num_items()?;
+        let mut text = ArrayVec::<u8, 128>::new();
+
+        match item_n {
+            0 => {
+                let label = pic_str!(b"Amount");
+                title[..label.len()].copy_from_slice(label);
+
+                self.write_amount(secp.amount, avax_asset, true, &mut text)?;
+                push(&mut text, pic_str!(b" to "!))?;
+                handle_ui_message(&text, message, page)
             }
-            _ => self.output.render_item(item_n, title, message, page),
+            x if x < inner_items => secp.render_item_with_hrp(hrp, x, title, message, page),
+            x if x == inner_items => {
+                let locktime = self.output.stakeable_locktime().ok_or(ViewError::NoData)?;
+
+                // legacy app displays:
+                // 'Funds locked', body: '0.5 AVAX until 2021-05-31 21:28:00 UTC'
+                let label = pic_str!(b"Funds locked");
+                title[..label.len()].copy_from_slice(label);
+
+                self.write_amount(secp.amount, avax_asset, false, &mut text)?;
+                push(&mut text, pic_str!(b" until "!))?;
+                let date = timestamp_to_str_date(locktime).map_err(|_| ViewError::Unknown)?;
+                push(&mut text, date.as_slice())?;
+                handle_ui_message(&text, message, page)
+            }
+            _ => Err(ViewError::NoData),
         }
+    }
+
+    /// "<amount> AVAX" for AVAX, "<raw amount> units" otherwise, followed by
+    /// " of asset <CB58 id>" if `with_asset`.
+    fn write_amount(
+        &self,
+        amount: u64,
+        avax_asset: Option<&[u8; 32]>,
+        with_asset: bool,
+        text: &mut ArrayVec<u8, 128>,
+    ) -> Result<(), ViewError> {
+        use bolos::{pic_str, PIC};
+
+        let mut num = [0; U64_FORMATTED_SIZE + 2];
+
+        if avax_asset == Some(self.asset_id.id()) {
+            let n = nano_avax_to_fp_str(amount, &mut num[..]).map_err(|_| ViewError::Unknown)?;
+            push(text, n)?;
+            return push(text, pic_str!(b" AVAX"!));
+        }
+
+        let n = u64_to_str(amount, &mut num[..]).map_err(|_| ViewError::Unknown)?;
+        push(text, n)?;
+        push(text, pic_str!(b" units"!))?;
+
+        if with_asset {
+            push(text, pic_str!(b" of asset "!))?;
+            let mut id = [0; ASSET_ID_CB58_MAX_LEN];
+            let len = self.asset_id.cb58_into(&mut id)?;
+            push(text, &id[..len])?;
+        }
+        Ok(())
     }
 
     /// Whether this output may be left off the review as change to
@@ -175,14 +279,7 @@ where
             return false;
         };
 
-        // A wrapper that adds screens of its own around the inner output
-        // (PvmOutput adds the stakeable-lock line) is never plain change.
-        let plain = match (self.output.num_items(), self.output().num_items()) {
-            (Ok(outer), Ok(inner)) => outer == inner,
-            _ => false,
-        };
-
-        plain
+        self.output.stakeable_locktime().is_none()
             && secp.locktime == 0
             && secp.threshold == 1
             && secp.addresses.len() == 1
@@ -194,7 +291,7 @@ where
 
 impl<'b, O> FromBytes<'b> for TransferableOutput<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     #[inline(never)]
     fn from_bytes_into(
@@ -218,7 +315,7 @@ where
 
 impl<'b, O> DisplayableItem for TransferableOutput<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     fn num_items(&self) -> Result<u8, ViewError> {
         // the asset_id is not part of the summary we need from objects of this type,
@@ -235,6 +332,11 @@ where
     ) -> Result<u8, ViewError> {
         self.output.render_item(item_n as _, title, message, page)
     }
+}
+
+fn push(text: &mut ArrayVec<u8, 128>, bytes: &[u8]) -> Result<(), ViewError> {
+    text.try_extend_from_slice(bytes)
+        .map_err(|_| ViewError::Unknown)
 }
 
 // Important: do not change the repr attribute,

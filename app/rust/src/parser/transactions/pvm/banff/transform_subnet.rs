@@ -66,6 +66,18 @@ pub struct TransformSubnetTx<'b> {
     auth: SubnetAuth<'b>,
 }
 
+impl TransformSubnetTx<'_> {
+    /// The subnet asset and how much of it the transaction burns: avalanchego
+    /// requires maximum_supply - initial_supply of it to be consumed, as
+    /// future staking rewards.
+    pub fn reward_burn(&self) -> (&[u8; 32], u64) {
+        (
+            self.asset_id.id(),
+            self.maximum_supply.saturating_sub(self.initial_supply),
+        )
+    }
+}
+
 impl<'b> FromBytes<'b> for TransformSubnetTx<'b> {
     fn from_bytes_into(
         input: &'b [u8],

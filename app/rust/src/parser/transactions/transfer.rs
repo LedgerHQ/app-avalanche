@@ -50,33 +50,18 @@ impl Transfer<'_> {
             .base_output_with_item(item_n)
             .map_err(|_| ViewError::NoData)?;
 
-        // this is a secp_transfer so it contain
-        // 1 item amount
-        // x items which is one item for each address
-        let num_inner_items = obj.num_items()?;
+        let hrp = self.header.hrp().map_err(|_| ViewError::Unknown)?;
+        let avax = self.base.avax_asset_id();
+        let res = obj.render_item_with_hrp(hrp, avax, idx, title, message, page);
 
-        match idx {
-            0 => {
-                // render using default obj impl
-                let res = obj.render_item(0, title, message, page);
-
-                title.iter_mut().for_each(|v| *v = 0);
-
-                // customize the label
-                let label = pic_str!(b"Transfer");
-                title[..label.len()].copy_from_slice(label);
-
-                res
-            }
-
-            // addresses, then the threshold when there are several
-            x @ 1.. if x < num_inner_items => {
-                let hrp = self.header.hrp().map_err(|_| ViewError::Unknown)?;
-                obj.render_item_with_hrp(hrp, x, title, message, page)
-            }
-
-            _ => Err(ViewError::NoData),
+        // customize the label of the amount
+        if idx == 0 {
+            title.iter_mut().for_each(|v| *v = 0);
+            let label = pic_str!(b"Transfer");
+            title[..label.len()].copy_from_slice(label);
         }
+
+        res
     }
 
     fn fee(&self) -> Result<u64, ParserError> {

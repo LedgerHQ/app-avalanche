@@ -21,8 +21,8 @@ use nom::{bytes::complete::take, number::complete::be_u32};
 use zemu_sys::ViewError;
 
 use crate::parser::{
-    DisplayableItem, FromBytes, Header, NetworkId, ObjectList, Output, OutputIdx, ParserError,
-    TransferableInput, TransferableOutput,
+    sum_amounts_in, sum_input_amounts_in, DisplayableItem, FromBytes, Header, NetworkId,
+    ObjectList, Output, OutputIdx, OutputLock, ParserError, TransferableInput, TransferableOutput,
 };
 
 pub const MAX_MEMO_LEN: usize = 256;
@@ -31,7 +31,7 @@ pub const MAX_MEMO_LEN: usize = 256;
 #[cfg_attr(test, derive(Debug))]
 pub struct BaseTxFields<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     // lazy parsing of inputs/outpus
     pub outputs: ObjectList<'b, TransferableOutput<'b, O>>,
@@ -52,7 +52,7 @@ where
 
 impl<'b, O> BaseTxFields<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     /// The AVAX asset id on this transaction's network, if it is known.
     pub fn avax_asset_id(&self) -> Option<&'static [u8; 32]> {
@@ -89,22 +89,15 @@ where
         self.renderable_out = render;
     }
 
+    /// Sum of the AVAX inputs (of every input on a network whose AVAX asset
+    /// is not known). The fee is paid in AVAX, so other assets never count.
     pub fn sum_inputs_amount(&self) -> Result<u64, ParserError> {
-        self.inputs
-            .iter()
-            .map(|input| input.amount().ok_or(ParserError::UnexpectedError))
-            .try_fold(0u64, |acc, x| {
-                acc.checked_add(x?).ok_or(ParserError::OperationOverflows)
-            })
+        sum_input_amounts_in(&self.inputs, self.avax_asset_id())
     }
 
+    /// Sum of the AVAX outputs, see sum_inputs_amount.
     pub fn sum_outputs_amount(&'b self) -> Result<u64, ParserError> {
-        self.outputs
-            .iter()
-            .map(|output| (*output).amount().ok_or(ParserError::UnexpectedError))
-            .try_fold(0u64, |acc, x| {
-                acc.checked_add(x?).ok_or(ParserError::OperationOverflows)
-            })
+        sum_amounts_in(&self.outputs, self.avax_asset_id())
     }
 
     pub fn outputs(&'b self) -> &'b ObjectList<'b, TransferableOutput<'b, O>> {
@@ -197,7 +190,7 @@ where
 
 impl<'b, O> BaseTxFields<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     /// Parse the base fields that follow `header` in a transaction.
     ///
@@ -251,7 +244,7 @@ where
 
 impl<'b, O> BaseTxFields<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     /// Render one item of one base output, encoding addresses with `hrp`.
     ///
@@ -273,24 +266,10 @@ where
             .base_output_with_item(item_n)
             .map_err(|_| ViewError::NoData)?;
 
-        let inner: &Output<'_> = &obj.output;
-
         // Only secp_transfer outputs are supported, as in import/export.
-        let _ = inner.secp_transfer().ok_or(ViewError::NoData)?;
+        let _ = obj.output().secp_transfer().ok_or(ViewError::NoData)?;
 
-        // Items of the inner output alone. A locked PvmOutput counts one more
-        // (the locked-funds line), which its own render_item draws below.
-        let num_inner_items = inner.num_items()?;
-
-        match obj_item_n {
-            0 => obj.render_item(obj_item_n, title, message, page),
-            // addresses, then the threshold when there are several
-            x @ 1.. if x < num_inner_items => {
-                obj.render_item_with_hrp(hrp, x, title, message, page)
-            }
-            x if x == num_inner_items => obj.render_item(obj_item_n, title, message, page),
-            _ => Err(ViewError::NoData),
-        }
+        obj.render_item_with_hrp(hrp, self.avax_asset_id(), obj_item_n, title, message, page)
     }
 }
 
@@ -372,7 +351,106 @@ mod tests {
         let shown = screens(&tx, Some(CHANGE));
         // the AVAX change is hidden, the other asset's is not
         assert!(!shown.iter().any(|s| s.contains("89.999")), "{:#?}", shown);
-        assert!(shown.iter().any(|s| s.starts_with("Transfer: 0.000000005")), "{:#?}", shown);
+        assert!(shown.iter().any(|s| s.starts_with("Transfer: 5 units of asset")), "{:#?}", shown);
+    }
+
+    // CB58 of OTHER_ASSET
+    const OTHER_ASSET_CB58: &str = "hgEUNSv636ed3cEHTBSscHtTj11sDdX7YxhpG5RtvbGqmUKmP";
+
+    #[test]
+    fn asset_of_every_output_is_shown() {
+        // The recipient's output switched to another asset used to review
+        // exactly like the honest AVAX transfer: every amount said "AVAX".
+        let honest = x_transfer(
+            &[out(10_000_000_000, RECIPIENT), out(89_999_000_000, CHANGE)],
+            &ins(),
+        );
+        let swapped = x_transfer(
+            &[
+                transferable(&OTHER_ASSET, secp_out(10_000_000_000, 0, 1, &[RECIPIENT])),
+                out(89_999_000_000, CHANGE),
+            ],
+            &[input(1, &FUJI_AVAX, 90_000_000_000), input(2, &OTHER_ASSET, 10_000_000_000)],
+        );
+        let honest = screens(&honest, Some(CHANGE));
+        let swapped = screens(&swapped, Some(CHANGE));
+
+        assert!(honest.contains(&"Transfer: 10 AVAX to ".to_string()), "{:#?}", honest);
+        assert_ne!(honest, swapped);
+        // raw units, as the asset's denomination is not known, and its id
+        let expected = format!("Transfer: 10000000000 units of asset {} to ", OTHER_ASSET_CB58);
+        assert!(swapped.contains(&expected), "{:#?}", swapped);
+        assert!(!swapped.iter().any(|s| s.contains("10 AVAX")), "{:#?}", swapped);
+    }
+
+    #[test]
+    fn fee_only_counts_avax() {
+        // 90 AVAX + 5 units of another asset in; 10 + 79.999 AVAX and the 5
+        // units out: the fee is 0.001 AVAX, whatever the other asset does.
+        let tx = x_transfer(
+            &[
+                out(10_000_000_000, RECIPIENT),
+                out(79_999_000_000, CHANGE),
+                transferable(&OTHER_ASSET, secp_out(5, 0, 1, &[RECIPIENT])),
+            ],
+            &[input(1, &FUJI_AVAX, 90_000_000_000), input(2, &OTHER_ASSET, 5)],
+        );
+        let shown = screens(&tx, Some(CHANGE));
+        assert_eq!(shown.last().unwrap(), "Fee(AVAX): 0.001", "{:#?}", shown);
+    }
+
+    #[test]
+    fn burning_another_asset_is_rejected() {
+        use crate::parser::{ParserError, Transaction};
+
+        // Inputs are not shown and the fee only counts AVAX, so 1e12 units
+        // of another asset spent into a transaction with AVAX outputs only
+        // reviewed like a plain AVAX transfer, and avalanchego burns them.
+        let burn = x_transfer(
+            &[out(10_000_000_000, RECIPIENT), out(89_999_000_000, CHANGE)],
+            &[
+                input(1, &FUJI_AVAX, 100_000_000_000),
+                input(2, &OTHER_ASSET, 1_000_000_000_000),
+            ],
+        );
+        assert_eq!(Transaction::new(&burn).unwrap_err(), ParserError::UnexpectedType);
+
+        // producing less of it than consumed is the same burn
+        let partial = x_transfer(
+            &[
+                out(10_000_000_000, RECIPIENT),
+                transferable(&OTHER_ASSET, secp_out(1, 0, 1, &[RECIPIENT])),
+            ],
+            &[input(1, &FUJI_AVAX, 100_000_000_000), input(2, &OTHER_ASSET, 2)],
+        );
+        assert_eq!(Transaction::new(&partial).unwrap_err(), ParserError::UnexpectedType);
+
+        // and producing more than consumed is not a valid transaction
+        let mint = x_transfer(
+            &[transferable(&OTHER_ASSET, secp_out(3, 0, 1, &[RECIPIENT]))],
+            &[input(1, &FUJI_AVAX, 100_000_000_000), input(2, &OTHER_ASSET, 2)],
+        );
+        assert_eq!(Transaction::new(&mint).unwrap_err(), ParserError::UnexpectedType);
+
+        // On a custom network the AVAX asset is not known, so nothing is
+        // checked there.
+        let mut custom = burn.clone();
+        custom[6..10].copy_from_slice(&1337u32.to_be_bytes());
+        assert!(Transaction::new(&custom).is_ok());
+    }
+
+    #[test]
+    fn nothing_is_avax_where_the_network_is_unknown() {
+        // On a custom network the AVAX asset id is not known: nothing is
+        // labelled AVAX, and nothing is hidden as change.
+        let mut tx = x_transfer(
+            &[out(10_000_000_000, RECIPIENT), out(89_999_000_000, CHANGE)],
+            &ins(),
+        );
+        tx[6..10].copy_from_slice(&1337u32.to_be_bytes());
+        let shown = screens(&tx, Some(CHANGE));
+        assert!(!shown.iter().any(|s| s.contains(" AVAX to")), "{:#?}", shown);
+        assert!(shown.iter().any(|s| s.starts_with("Transfer: 89999000000 units")), "{:#?}", shown);
     }
 
     #[test]

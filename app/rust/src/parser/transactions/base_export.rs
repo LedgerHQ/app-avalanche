@@ -24,8 +24,9 @@ use crate::{
     constants::chain_alias_lookup,
     handlers::handle_ui_message,
     parser::{
-        BaseTxFields, ChainId, DisplayableItem, FromBytes, Header, ObjectList, Output, OutputIdx,
-        ParserError, TransferableInput, TransferableOutput, BLOCKCHAIN_ID_LEN,
+        sum_amounts_in, BaseTxFields, ChainId, DisplayableItem, FromBytes, Header, ObjectList,
+        Output, OutputIdx, OutputLock, ParserError, TransferableInput, TransferableOutput,
+        BLOCKCHAIN_ID_LEN,
     },
 };
 
@@ -36,7 +37,7 @@ const EXPORT_TX_DESCRIPTION_LEN: usize = 13; //X to C Chain
 #[cfg_attr(test, derive(Debug))]
 pub struct BaseExport<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     pub tx_header: Header<'b>,
     pub base_tx: BaseTxFields<'b, O>,
@@ -50,7 +51,7 @@ where
 
 impl<'b, O> FromBytes<'b> for BaseExport<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     #[inline(never)]
     fn from_bytes_into(
@@ -106,7 +107,7 @@ where
 
 impl<'b, O> BaseExport<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     pub fn disable_output_if(&mut self, address: &[u8]) {
         self.base_tx.disable_output_if(address);
@@ -166,13 +167,9 @@ where
         Ok(fee)
     }
 
+    // AVAX only, as the fee is paid in AVAX
     pub fn sum_export_outputs_amount(&'b self) -> Result<u64, ParserError> {
-        self.outputs
-            .iter()
-            .map(|output| output.amount().ok_or(ParserError::UnexpectedError))
-            .try_fold(0u64, |acc, x| {
-                acc.checked_add(x?).ok_or(ParserError::OperationOverflows)
-            })
+        sum_amounts_in(&self.outputs, self.tx_header.avax_asset_id())
     }
 
     // Default implementation similar to "num_items", this relies on the
@@ -260,26 +257,12 @@ where
         page: u8,
     ) -> Result<u8, zemu_sys::ViewError> {
         let (obj, obj_item_n) = self.get_output_with_item(item_n)?;
+        // Import/Export only supports secp_transfer types
+        let _ = obj.output().secp_transfer().ok_or(ViewError::NoData)?;
 
-        // Base Import/Export only supports secp_transfer types
-        let obj = (*obj).secp_transfer().ok_or(ViewError::NoData)?;
-
-        // get the number of items for the obj wrapped up by PvmOutput
-        let num_inner_items = obj.num_items()?;
-
-        // do a custom rendering of the first base_output_items
-        match obj_item_n {
-            0 => {
-                // render amount
-                obj.render_item(0, title, message, page)
-            }
-            // addresses, then the threshold when there are several
-            x @ 1.. if x < num_inner_items => {
-                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
-                obj.render_item_with_hrp(hrp, x, title, message, page)
-            }
-            _ => Err(ViewError::NoData),
-        }
+        let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+        let avax = self.tx_header.avax_asset_id();
+        obj.render_item_with_hrp(hrp, avax, obj_item_n, title, message, page)
     }
 
     pub fn render_export_description(

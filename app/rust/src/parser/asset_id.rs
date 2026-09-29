@@ -30,9 +30,29 @@ pub const ASSET_ID_LEN: usize = 32;
 #[cfg_attr(any(test, feature = "derive-debug"), derive(Debug))]
 pub struct AssetId<'b>(&'b [u8; ASSET_ID_LEN]);
 
+/// Length of an asset id encoded as CB58
+pub const ASSET_ID_CB58_MAX_LEN: usize = cb58_output_len::<ASSET_ID_LEN>();
+
 impl AssetId<'_> {
     pub fn id(&self) -> &[u8; ASSET_ID_LEN] {
         self.0
+    }
+
+    /// Encode the id as CB58 (base58 with a 4-byte sha256 checksum), the
+    /// form wallets and explorers show, into `out`. Returns the length.
+    pub fn cb58_into(&self, out: &mut [u8; ASSET_ID_CB58_MAX_LEN]) -> Result<usize, ViewError> {
+        use bolos::hash::{Hasher, Sha256};
+
+        let mut data = [0; ASSET_ID_LEN + CB58_CHECKSUM_LEN];
+
+        data[..ASSET_ID_LEN].copy_from_slice(&self.0[..]);
+
+        let checksum = Sha256::digest(&data[..ASSET_ID_LEN]).map_err(|_| ViewError::Unknown)?;
+
+        // prepare the data to be encoded by appending last 4-byte
+        data[ASSET_ID_LEN..].copy_from_slice(&checksum[(Sha256::DIGEST_LEN - CB58_CHECKSUM_LEN)..]);
+
+        bs58_encode(data, &mut out[..]).map_err(|_| ViewError::Unknown)
     }
 }
 
@@ -68,10 +88,7 @@ impl DisplayableItem for AssetId<'_> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
-        use bolos::{
-            hash::{Hasher, Sha256},
-            pic_str, PIC,
-        };
+        use bolos::{pic_str, PIC};
 
         if item_n != 0 {
             return Err(ViewError::NoData);
@@ -79,19 +96,9 @@ impl DisplayableItem for AssetId<'_> {
 
         let title_content = pic_str!(b"AssetId");
         title[..title_content.len()].copy_from_slice(title_content);
-        let mut data = [0; ASSET_ID_LEN + CB58_CHECKSUM_LEN];
 
-        data[..ASSET_ID_LEN].copy_from_slice(&self.0[..]);
-
-        let checksum = Sha256::digest(&data[..ASSET_ID_LEN]).map_err(|_| ViewError::Unknown)?;
-
-        // prepare the data to be encoded by appending last 4-byte
-        data[ASSET_ID_LEN..].copy_from_slice(&checksum[(Sha256::DIGEST_LEN - CB58_CHECKSUM_LEN)..]);
-
-        const MAX_SIZE: usize = cb58_output_len::<ASSET_ID_LEN>();
-        let mut encoded = [0; MAX_SIZE];
-
-        let len = bs58_encode(data, &mut encoded[..]).map_err(|_| ViewError::Unknown)?;
+        let mut encoded = [0; ASSET_ID_CB58_MAX_LEN];
+        let len = self.cb58_into(&mut encoded)?;
 
         handle_ui_message(&encoded[..len], message, page)
     }

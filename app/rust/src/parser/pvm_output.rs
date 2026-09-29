@@ -18,7 +18,7 @@ use crate::{
     parser::{
         error::ParserError, nano_avax_to_fp_str, timestamp_to_date, timestamp_to_str_date, Address,
         DisplayableItem,
-        FromBytes, Output, OutputType, SECPOutputOwners, SECPTransferOutput,
+        FromBytes, Output, OutputLock, OutputType, SECPOutputOwners, SECPTransferOutput,
         FORMATTED_STR_DATE_LEN, U64_FORMATTED_SIZE
     },
 };
@@ -50,6 +50,12 @@ impl<'b> Deref for PvmOutput<'b> {
 
     fn deref(&self) -> &Self::Target {
         &self.output
+    }
+}
+
+impl OutputLock for PvmOutput<'_> {
+    fn stakeable_locktime(&self) -> Option<u64> {
+        self.locktime
     }
 }
 
