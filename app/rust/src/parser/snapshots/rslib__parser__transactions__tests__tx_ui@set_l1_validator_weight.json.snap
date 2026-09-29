@@ -16,5 +16,5 @@ input_file: src/parser/testvectors/set_l1_validator_weight.json
     "Address": "avax1g32kvaugnx4tk3z4vemc3xd2hdz92enh972wxr",
     "Funds locked": "1152921504606846976 units until 1997-10-11 04:13:30 UTC",
     "Fee(AVAX)": "0.999999999",
-    "Memo": "f09f98850a77656c6c2074686174277301234521",
+    "Memo": "0xf09f98850a77656c6c2074686174277301234521",
 ]

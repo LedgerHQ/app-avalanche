@@ -276,4 +276,25 @@ mod tests {
     fn parse_operation_tx() {
         let (_, _tx) = OperationTx::from_bytes(DATA).unwrap();
     }
+
+    #[test]
+    fn operation_shows_its_asset() {
+        use crate::parser::tx_builder::{screens, testvectors_path};
+        use std::prelude::v1::*;
+
+        // The asset an operation acts on was never shown: an NFT transfer
+        // of any collection the user holds reviewed the same.
+        let file = std::fs::File::open(testvectors_path("x_operation.json")).unwrap();
+        let data: Vec<u8> = serde_json::from_reader(file).unwrap();
+        let shown = screens(&data, None);
+        let op = shown
+            .iter()
+            .position(|s| s == "Op. Type:: NFTTransferOperation")
+            .expect("operation type screen");
+        // CB58 of the vector's asset id 0x000102..1f
+        assert_eq!(
+            shown[op + 1],
+            "Asset: 16qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9cWcm5W"
+        );
+    }
 }

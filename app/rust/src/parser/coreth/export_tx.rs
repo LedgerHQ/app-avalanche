@@ -34,6 +34,7 @@ use crate::{
 };
 
 use super::{inputs::EVMInput, outputs::EOutput};
+use crate::parser::title_export_amount;
 
 const DESTINATION_CHAIN_LEN: usize = BLOCKCHAIN_ID_LEN;
 const EXPORT_TX_DESCRIPTION_LEN: usize = 13; //X to C Chain
@@ -244,7 +245,12 @@ impl<'b> ExportTx<'b> {
 
         let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
         let avax = self.tx_header.avax_asset_id();
-        obj.render_item_with_hrp(hrp, avax, obj_item_n, title, message, page)
+        let res = obj.render_item_with_hrp(hrp, avax, obj_item_n, title, message, page);
+
+        if obj_item_n == 0 {
+            title_export_amount(self.destination_chain, title)?;
+        }
+        res
     }
 
     fn render_export_description(

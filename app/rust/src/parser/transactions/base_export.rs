@@ -31,6 +31,24 @@ use crate::{
 };
 
 pub const DESTINATION_CHAIN_LEN: usize = BLOCKCHAIN_ID_LEN;
+
+/// Title an exported output's amount screen "Export to <chain>", so it
+/// cannot be mistaken for an output that stays on this chain: both used to
+/// be titled "Amount".
+pub fn title_export_amount(
+    destination_chain: &[u8; DESTINATION_CHAIN_LEN],
+    title: &mut [u8],
+) -> Result<(), ViewError> {
+    let label = pic_str!(b"Export to "!);
+    let alias = chain_alias_lookup(destination_chain)
+        .map(|a| a.as_bytes())
+        .map_err(|_| ViewError::Unknown)?;
+
+    title.iter_mut().for_each(|v| *v = 0);
+    title[..label.len()].copy_from_slice(&label[..]);
+    title[label.len()..label.len() + alias.len()].copy_from_slice(alias);
+    Ok(())
+}
 const EXPORT_TX_DESCRIPTION_LEN: usize = 13; //X to C Chain
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -277,7 +295,12 @@ where
 
         let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
         let avax = self.tx_header.avax_asset_id();
-        obj.render_item_with_hrp(hrp, avax, obj_item_n, title, message, page)
+        let res = obj.render_item_with_hrp(hrp, avax, obj_item_n, title, message, page);
+
+        if obj_item_n == 0 {
+            title_export_amount(self.destination_chain, title)?;
+        }
+        res
     }
 
     pub fn render_export_description(

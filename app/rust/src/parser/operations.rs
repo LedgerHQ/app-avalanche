@@ -29,7 +29,9 @@ use core::{mem::MaybeUninit, ptr::addr_of_mut};
 
 use crate::checked_add;
 use crate::handlers::handle_ui_message;
-use crate::parser::{AssetId, DisplayableItem, FromBytes, ObjectList, UtxoId};
+use crate::parser::{
+    asset_id::ASSET_ID_CB58_MAX_LEN, AssetId, DisplayableItem, FromBytes, ObjectList, UtxoId,
+};
 
 use super::ParserError;
 
@@ -64,6 +66,11 @@ impl<'b> FromBytes<'b> for TransferableOp<'b> {
 }
 
 impl TransferableOp<'_> {
+    /// Items: the operation type, then the asset it operates on, then the
+    /// operation's own items with addresses encoded for `hrp`.
+    ///
+    /// The asset was never shown, so an operation on any asset the user
+    /// holds reviewed the same as one on the asset they meant.
     pub fn render_item_with_hrp(
         &self,
         hrp: &str,
@@ -72,14 +79,31 @@ impl TransferableOp<'_> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
-        self.operation
-            .render_item_with_hrp(hrp, item_n, title, message, page)
+        use bolos::{pic_str, PIC};
+
+        match item_n {
+            0 => self
+                .operation
+                .render_item_with_hrp(hrp, 0, title, message, page),
+            1 => {
+                let label = pic_str!(b"Asset");
+                title[..label.len()].copy_from_slice(label);
+
+                let mut encoded = [0; ASSET_ID_CB58_MAX_LEN];
+                let len = self.asset_id.cb58_into(&mut encoded)?;
+                handle_ui_message(&encoded[..len], message, page)
+            }
+            x => self
+                .operation
+                .render_item_with_hrp(hrp, x - 1, title, message, page),
+        }
     }
 }
 
 impl DisplayableItem for TransferableOp<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        self.operation.num_items()
+        // the operation's items and the asset
+        checked_add!(ViewError::Unknown, self.operation.num_items()?, 1u8)
     }
 
     fn render_item(
@@ -89,7 +113,7 @@ impl DisplayableItem for TransferableOp<'_> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, zemu_sys::ViewError> {
-        self.operation.render_item(item_n, title, message, page)
+        self.render_item_with_hrp("", item_n, title, message, page)
     }
 }
 

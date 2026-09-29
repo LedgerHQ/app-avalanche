@@ -5,12 +5,12 @@ input_file: src/parser/testvectors/x_export_to_c3.json
 ---
 [
     "Export Tx": "X to C Chain",
-    "Amount": "0.000012345 AVAX to ",
+    "Export to C": "0.000012345 AVAX to ",
     "Address": "fuji12yp9cc0melq83a5nxnurf0nd6fk4t224unmnwx",
     "Locked until": "1970-01-01 15:05:21 UTC",
     "Amount": "0.000012345 AVAX to ",
     "Address": "fuji1cv6yz28qvqfgah34yw3y53su39p6kzzehw5pj3",
     "Locked until": "1970-01-01 15:05:21 UTC",
     "Fee(AVAX)": "0.123432099",
-    "Memo": "00010203",
+    "Memo": "0x00010203",
 ]

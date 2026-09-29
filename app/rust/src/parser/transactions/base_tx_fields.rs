@@ -529,6 +529,35 @@ mod tests {
     }
 
     #[test]
+    fn hex_memo_cannot_pass_for_text() {
+        let with_memo = |memo: &[u8]| {
+            let mut tx = x_transfer(&[out(10_000_000_000, RECIPIENT)], &ins());
+            let len = tx.len();
+            tx[len - 4..].copy_from_slice(&(memo.len() as u32).to_be_bytes());
+            tx.extend(memo);
+            screens(&tx, None).last().unwrap().clone()
+        };
+
+        // The text "00010203" and the bytes 00 01 02 03 used to look the same
+        assert_eq!(with_memo(b"00010203"), "Memo: 00010203");
+        assert_eq!(with_memo(&[0, 1, 2, 3]), "Memo: 0x00010203");
+        // and text that looks like hex is shown as hex
+        assert_eq!(with_memo(b"0x0102"), "Memo: 0x307830313032");
+    }
+
+    #[test]
+    fn exported_outputs_are_labelled_as_leaving_the_chain() {
+        use crate::parser::tx_builder::testvectors_path;
+
+        // exported and local outputs were both titled "Amount"
+        let file = std::fs::File::open(testvectors_path("p_export_to_x.json")).unwrap();
+        let data: Vec<u8> = serde_json::from_reader(file).unwrap();
+        let shown = screens(&data, None);
+        assert!(shown.iter().any(|s| s.starts_with("Export to X: ")), "{:#?}", shown);
+        assert!(shown.iter().any(|s| s.starts_with("Amount: ")), "{:#?}", shown);
+    }
+
+    #[test]
     fn locktime_past_date_table_is_rejected() {
         let tx = x_transfer(
             &[transferable(&FUJI_AVAX, secp_out(10_000_000_000, u64::MAX, 1, &[RECIPIENT]))],

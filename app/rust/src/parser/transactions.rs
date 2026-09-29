@@ -28,7 +28,7 @@ mod base_tx_fields;
 mod transfer;
 mod tx_header;
 
-pub use base_export::BaseExport;
+pub use base_export::{title_export_amount, BaseExport};
 pub use base_import::BaseImport;
 pub use base_tx_fields::{output_visibility, BaseTxFields};
 pub use transfer::Transfer;
@@ -904,13 +904,18 @@ impl Transaction<'_> {
 
         // Memos are arbitrary host bytes. Printable ASCII goes through as text;
         // anything else is hex so control characters and bidi overrides cannot
-        // reach the screen.
-        if memo.iter().all(|c| (0x20..0x7f).contains(c)) {
+        // reach the screen. Hex is prefixed with 0x, and a text memo that
+        // itself starts with "0x" is shown as hex too: otherwise the text
+        // "00010203" and the bytes 00 01 02 03 looked the same.
+        let printable = memo.iter().all(|c| (0x20..0x7f).contains(c));
+        if printable && !memo.starts_with(b"0x") {
             handle_ui_message(memo, message, page)
         } else {
-            let mut hex = [0; MAX_MEMO_LEN * 2];
-            let len = hex_encode(memo, &mut hex[..]).map_err(|_| ViewError::Unknown)?;
-            handle_ui_message(&hex[..len], message, page)
+            let prefix = pic_str!(b"0x"!);
+            let mut hex = [0; MAX_MEMO_LEN * 2 + 2];
+            hex[..prefix.len()].copy_from_slice(&prefix[..]);
+            let len = hex_encode(memo, &mut hex[prefix.len()..]).map_err(|_| ViewError::Unknown)?;
+            handle_ui_message(&hex[..prefix.len() + len], message, page)
         }
     }
 }

@@ -191,7 +191,12 @@ impl NFTTransferOutput<'_> {
                 let mut buf = [0; SHOW_PAYLOAD_LEN + 4 + 2]; // suffix and preffix
                 let mut len = self.payload.len();
 
-                if self.payload.is_ascii() {
+                // Only printable ASCII goes through as text: a NUL used to
+                // end the payload shown early, and control bytes reached the
+                // screen raw. Anything else is shown as hex, 0x-prefixed, and
+                // so is text starting with "0x", which would look like hex.
+                let printable = self.payload.iter().all(|c| (0x20..0x7f).contains(c));
+                if printable && !self.payload.starts_with(b"0x") {
                     if len > SHOW_PAYLOAD_LEN {
                         show_suffix = true;
                         len = SHOW_PAYLOAD_LEN;
@@ -273,6 +278,33 @@ mod tests {
         let out = NFTTransferOutput::from_bytes(&data).unwrap().1;
         assert_eq!(out.num_items().unwrap(), 5);
         assert_eq!(render_all(&out).last().unwrap(), "Threshold: 1 of 2");
+    }
+
+    #[test]
+    fn payload_with_control_bytes_is_shown_as_hex() {
+        use crate::parser::tx_builder::{render_all, RECIPIENT};
+        use std::prelude::v1::*;
+
+        // "ab\0cd": the NUL passed is_ascii and ended the payload shown at "ab"
+        let mut data = vec![0, 0, 0, 11, 0, 0, 0, 1, 0, 0, 0, 5];
+        data.extend(b"ab\0cd");
+        data.extend(0u64.to_be_bytes());
+        data.extend(1u32.to_be_bytes());
+        data.extend(1u32.to_be_bytes());
+        data.extend(RECIPIENT);
+
+        let out = NFTTransferOutput::from_bytes(&data).unwrap().1;
+        assert_eq!(render_all(&out)[1], "Payload: : 0x6162006364");
+
+        // and text that looks like hex is shown as hex
+        let mut data = vec![0, 0, 0, 11, 0, 0, 0, 1, 0, 0, 0, 4];
+        data.extend(b"0x01");
+        data.extend(0u64.to_be_bytes());
+        data.extend(1u32.to_be_bytes());
+        data.extend(1u32.to_be_bytes());
+        data.extend(RECIPIENT);
+        let out = NFTTransferOutput::from_bytes(&data).unwrap().1;
+        assert_eq!(render_all(&out)[1], "Payload: : 0x30783031");
     }
 
     #[test]

@@ -14,5 +14,5 @@ input_file: src/parser/testvectors/x_create_asset.json
     "Threshold": "1 of 2",
     "Locked until": "1970-01-01 15:05:21 UTC",
     "Fee(AVAX)": "0",
-    "Memo": "00010203",
+    "Memo": "0x00010203",
 ]

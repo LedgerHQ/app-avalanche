@@ -219,3 +219,8 @@ pub fn screens_with_change(data: &[u8], change: &[[u8; 20]]) -> Vec<String> {
     tx.show_outputs_if_all_hidden();
     render_all(&tx)
 }
+
+/// Path of one of the JSON test vectors
+pub fn testvectors_path(name: &str) -> String {
+    format!("{}/src/parser/testvectors/{}", env!("CARGO_MANIFEST_DIR"), name)
+}
