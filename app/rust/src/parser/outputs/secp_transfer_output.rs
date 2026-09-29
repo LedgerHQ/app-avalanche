@@ -78,7 +78,11 @@ impl<'b> FromBytes<'b> for SECPTransferOutput<'b> {
         let addresses =
             bytemuck::try_cast_slice(addresses).map_err(|_| ParserError::InvalidAddressLength)?;
 
-        if (threshold as usize > addresses.len()) || (addresses.is_empty() && threshold != 0) {
+        // threshold 0 is rejected outright. With no addresses avalanchego
+        // accepts it and anyone can spend the output with no signature, while
+        // the review shows an amount with no recipient; with addresses it is
+        // not a valid output at all.
+        if threshold == 0 || threshold as usize > addresses.len() {
             return Err(ParserError::InvalidThreshold.into());
         }
 
@@ -212,6 +216,43 @@ mod tests {
 
         let output = SECPTransferOutput::from_bytes(&raw_output).unwrap_err();
         assert_eq!(output, ParserError::InvalidThreshold.into());
+    }
+
+    #[test]
+    fn parse_secp256k1_output_rejects_threshold_zero() {
+        use crate::parser::tx_builder::{secp_out, RECIPIENT};
+
+        // No addresses: valid on-chain, and anyone can spend it with no
+        // signature, but the review showed "X AVAX to" with no recipient.
+        let anyone_can_spend = secp_out(1_000, 0, 0, &[]);
+        // With addresses avalanchego rejects it as unoptimized.
+        let unoptimized = secp_out(1_000, 0, 0, &[RECIPIENT]);
+
+        for raw in [anyone_can_spend, unoptimized] {
+            let err = SECPTransferOutput::from_bytes(&raw).unwrap_err();
+            assert_eq!(err, ParserError::InvalidThreshold.into());
+        }
+
+        assert!(SECPTransferOutput::from_bytes(&secp_out(1_000, 0, 1, &[RECIPIENT])).is_ok());
+    }
+
+    #[test]
+    fn anyone_can_spend_output_rejects_the_transaction() {
+        use crate::parser::tx_builder::*;
+        use crate::parser::Transaction;
+
+        let ins = [input(1, &FUJI_AVAX, 100_000_000_000)];
+        let tx = x_transfer(
+            &[
+                out(10_000_000_000, RECIPIENT),
+                transferable(&FUJI_AVAX, secp_out(89_999_000_000, 0, 0, &[])),
+            ],
+            &ins,
+        );
+        assert_eq!(
+            Transaction::new(&tx).unwrap_err(),
+            ParserError::InvalidThreshold
+        );
     }
 
     #[test]

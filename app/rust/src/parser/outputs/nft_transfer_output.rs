@@ -91,7 +91,9 @@ impl<'b> NFTTransferOutput<'b> {
         let addresses =
             bytemuck::try_cast_slice(addresses).map_err(|_| ParserError::InvalidAddressLength)?;
 
-        if (threshold as usize > addresses.len()) || (addresses.is_empty() && threshold != 0) {
+        // threshold 0 is rejected as in SECPTransferOutput: with no addresses
+        // anyone can spend or mint, with addresses it is not valid on-chain.
+        if threshold == 0 || threshold as usize > addresses.len() {
             return Err(ParserError::InvalidThreshold.into());
         }
 
@@ -231,7 +233,7 @@ mod tests {
 
     const DATA: &[u8] = &[
         0, 0, 0, 11, 0, 0, 0, 10, 0, 0, 0, 20, 110, 102, 116, 95, 116, 114, 97, 110, 115, 102, 101,
-        114, 95, 112, 97, 121, 108, 111, 97, 100, 0, 0, 0, 0, 0, 0, 0, 56, 0, 0, 0, 0, 0, 0, 0, 1,
+        114, 95, 112, 97, 121, 108, 111, 97, 100, 0, 0, 0, 0, 0, 0, 0, 56, 0, 0, 0, 1, 0, 0, 0, 1,
         22, 54, 119, 75, 103, 131, 141, 236, 22, 225, 106, 182, 207, 172, 178, 27, 136, 195, 168,
         97,
     ];
@@ -242,7 +244,7 @@ mod tests {
         assert_eq!(out.locktime, 56);
         assert_eq!(out.group_id, 10);
         assert_eq!(out.addresses.len(), 1);
-        assert_eq!(out.threshold, 0);
+        assert_eq!(out.threshold, 1);
         assert_eq!(out.payload, "nft_transfer_payload".as_bytes());
         assert_eq!(out.addresses[0][..], DATA[(DATA.len() - 20)..]);
     }

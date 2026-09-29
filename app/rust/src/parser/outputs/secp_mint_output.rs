@@ -77,7 +77,9 @@ impl<'b> FromBytes<'b> for SECPMintOutput<'b> {
         let addresses =
             bytemuck::try_cast_slice(addresses).map_err(|_| ParserError::InvalidAddressLength)?;
 
-        if (threshold as usize > addresses.len()) || (addresses.is_empty() && threshold != 0) {
+        // threshold 0 is rejected as in SECPTransferOutput: with no addresses
+        // anyone can spend or mint, with addresses it is not valid on-chain.
+        if threshold == 0 || threshold as usize > addresses.len() {
             return Err(ParserError::InvalidThreshold.into());
         }
 
@@ -179,7 +181,7 @@ impl SECPMintOutput<'_> {
 mod tests {
     use super::*;
     const DATA: &[u8] = &[
-        0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 107, 106, 1, 167, 20, 122, 95,
+        0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 107, 106, 1, 167, 20, 122, 95,
         155, 189, 52, 132, 21, 94, 230, 26, 133, 92, 231, 53, 186, 0, 0, 0, 0, 0, 0, 0, 0, 127,
         201, 61, 133, 198, 214, 44, 91, 42, 192, 181, 25, 200, 112, 16, 234, 82, 148, 1, 45, 30,
         64, 112, 48, 214, 172, 208, 2, 28, 172, 16, 213, 0, 0, 0, 1, 71, 17, 128, 245, 190, 100,
@@ -198,7 +200,7 @@ mod tests {
         let output = SECPMintOutput::from_bytes(DATA).unwrap().1;
 
         assert_eq!(output.locktime, 0);
-        assert_eq!(output.threshold, 0);
+        assert_eq!(output.threshold, 1);
         assert_eq!(output.addresses.len(), 1);
     }
 }

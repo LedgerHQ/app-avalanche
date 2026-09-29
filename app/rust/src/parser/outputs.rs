@@ -331,7 +331,7 @@ mod tests {
 
     const DATA: &[u8] = &[
         1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-        1, 1, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 56, 0, 0, 0, 0, 0, 0, 0, 1, 22, 54,
+        1, 1, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 56, 0, 0, 0, 1, 0, 0, 0, 1, 22, 54,
         119, 75, 103, 131, 141, 236, 22, 225, 106, 182, 207, 172, 178, 27, 136, 195, 168, 97,
     ];
 
@@ -356,6 +356,42 @@ mod tests {
             .unwrap()
             .1;
         assert_eq!(output.output.locktime.unwrap(), 8);
+    }
+
+    #[test]
+    fn mint_and_nft_outputs_reject_threshold_zero() {
+        use std::prelude::v1::*;
+
+        // owners part: locktime, threshold, addresses
+        fn owners(threshold: u32, addrs: usize) -> Vec<u8> {
+            let mut v = 0u64.to_be_bytes().to_vec();
+            v.extend(threshold.to_be_bytes());
+            v.extend((addrs as u32).to_be_bytes());
+            v.extend(std::vec![0x63u8; 20 * addrs]);
+            v
+        }
+
+        for (threshold, addrs) in [(0, 0), (0, 1), (1, 1)] {
+            let mut secp_mint = SECPMintOutput::TYPE_ID.to_be_bytes().to_vec();
+            secp_mint.extend(owners(threshold, addrs));
+
+            let mut nft_mint = NFTMintOutput::TYPE_ID.to_be_bytes().to_vec();
+            nft_mint.extend(7u32.to_be_bytes()); // group id
+            nft_mint.extend(owners(threshold, addrs));
+
+            let mut nft_transfer = NFTTransferOutput::TYPE_ID.to_be_bytes().to_vec();
+            nft_transfer.extend(7u32.to_be_bytes()); // group id
+            nft_transfer.extend(2u32.to_be_bytes()); // payload
+            nft_transfer.extend(b"hi");
+            nft_transfer.extend(owners(threshold, addrs));
+
+            // threshold 0 with no addresses is anyone-can-spend (or mint),
+            // with addresses it is not valid on-chain
+            let valid = threshold != 0;
+            assert_eq!(SECPMintOutput::from_bytes(&secp_mint).is_ok(), valid);
+            assert_eq!(NFTMintOutput::from_bytes(&nft_mint).is_ok(), valid);
+            assert_eq!(NFTTransferOutput::from_bytes(&nft_transfer).is_ok(), valid);
+        }
     }
 
     #[test]

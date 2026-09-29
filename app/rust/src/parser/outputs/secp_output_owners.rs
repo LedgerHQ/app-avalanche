@@ -98,7 +98,11 @@ impl<'b> FromBytes<'b> for SECPOutputOwners<'b> {
         let addresses =
             bytemuck::try_cast_slice(addresses).map_err(|_| ParserError::InvalidAddressLength)?;
 
-        if threshold as usize > addresses.len() {
+        // threshold 0 is rejected outright. With no addresses avalanchego
+        // accepts it and anyone can claim what these owners control (rewards,
+        // a subnet) with no signature, while the review shows no owner at
+        // all; with addresses it is not a valid owner set at all.
+        if threshold == 0 || threshold as usize > addresses.len() {
             return Err(ParserError::InvalidThreshold.into());
         }
 
@@ -195,6 +199,36 @@ mod tests {
         assert_eq!(owner.locktime, 12);
         assert_eq!(owner.threshold, 1);
         assert_eq!(owner.addresses.len(), 1);
+    }
+
+    #[test]
+    fn owners_with_threshold_zero_are_rejected() {
+        use crate::parser::tx_builder::{owners, RECIPIENT};
+
+        // No addresses means anyone can claim what they own (rewards, a
+        // subnet) with no signature; with addresses it is not valid at all.
+        for raw in [owners(0, 0, &[]), owners(0, 0, &[RECIPIENT])] {
+            let err = SECPOutputOwners::from_bytes(&raw).unwrap_err();
+            assert_eq!(err, ParserError::InvalidThreshold.into());
+        }
+
+        assert!(SECPOutputOwners::from_bytes(&owners(0, 1, &[RECIPIENT])).is_ok());
+    }
+
+    #[test]
+    fn empty_rewards_owner_rejects_the_transaction() {
+        use crate::parser::tx_builder::*;
+        use crate::parser::Transaction;
+
+        // The rewards owner contributed no screen at all, so the review looked
+        // the same as one paying rewards to the user.
+        let ins = [input(1, &FUJI_AVAX, 100_000_000_000)];
+        let stake = [out(2_000_000_000_000, CHANGE)];
+        let tx = add_delegator(&[], &ins, &stake, owners(0, 0, &[]));
+        assert_eq!(
+            Transaction::new(&tx).unwrap_err(),
+            ParserError::InvalidThreshold
+        );
     }
 
     #[test]

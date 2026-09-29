@@ -1,6 +1,5 @@
 ---
 source: src/parser/transactions.rs
-assertion_line: 787
 expression: reduced
 input_file: src/parser/testvectors/increase_l1_validator_balance.json
 ---
@@ -9,6 +8,7 @@ input_file: src/parser/testvectors/increase_l1_validator_balance.json
     "Validator": "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "Amount(AVAX)": "1",
     "Amount": "0.000000001 AVAX to ",
+    "Address": "avax18jma8ppw3nhx5r4ap8clazz0dps7rv5ukulre5",
     "Funds locked": "0.000000001 AVAX until 1972-10-11 12:25:21 UTC",
     "Amount": "0.000000001 AVAX to ",
     "Address": "avax1g32kvaugnx4tk3z4vemc3xd2hdz92enh972wxr",

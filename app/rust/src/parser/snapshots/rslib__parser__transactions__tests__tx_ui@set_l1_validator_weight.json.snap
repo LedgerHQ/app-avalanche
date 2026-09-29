@@ -1,6 +1,5 @@
 ---
 source: src/parser/transactions.rs
-assertion_line: 787
 expression: reduced
 input_file: src/parser/testvectors/set_l1_validator_weight.json
 ---
@@ -10,6 +9,7 @@ input_file: src/parser/testvectors/set_l1_validator_weight.json
     "Nonce": "42",
     "Weight": "2000",
     "Amount": "0.000000001 AVAX to ",
+    "Address": "avax18jma8ppw3nhx5r4ap8clazz0dps7rv5ukulre5",
     "Funds locked": "0.000000001 AVAX until 1972-10-11 12:25:21 UTC",
     "Amount": "1 AVAX to ",
     "Address": "avax1g32kvaugnx4tk3z4vemc3xd2hdz92enh972wxr",
