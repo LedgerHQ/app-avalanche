@@ -44,6 +44,11 @@ impl Header<'_> {
         let info = self.network_id()?;
         Ok(info.hrp())
     }
+
+    /// The AVAX asset id on this transaction's network, if it is known.
+    pub fn avax_asset_id(&self) -> Option<&'static [u8; 32]> {
+        self.network_id().ok()?.avax_asset_id()
+    }
 }
 
 impl<'b> FromBytes<'b> for Header<'b> {

@@ -26,7 +26,7 @@ use crate::{
     handlers::handle_ui_message,
     parser::{
         nano_avax_to_fp_str,
-        outputs::{render_threshold, shows_threshold},
+        outputs::{check_locktime, render_locktime, render_threshold, shows_threshold},
         Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES,
         U64_FORMATTED_SIZE,
     },
@@ -91,6 +91,10 @@ impl<'b> FromBytes<'b> for SECPTransferOutput<'b> {
             return Err(ParserError::InvalidThreshold.into());
         }
 
+        // A non-zero locktime is shown as a date, so refuse one the date
+        // formatter cannot represent here rather than failing to render it.
+        check_locktime(locktime)?;
+
         //good ptr and no uninit reads
         let out = out.as_mut_ptr();
         unsafe {
@@ -110,12 +114,14 @@ impl DisplayableItem for SECPTransferOutput<'_> {
         // we should summarize the items to show. As they suggested we only show the amount
         // and address. Legacy app errors if there is more than 1 address, in our case we dont yet.
         //
-        // amount, addresses and, with several addresses, the threshold
+        // amount, addresses and, with several addresses, the threshold, and
+        // when the output is time-locked, the date it unlocks
         checked_add!(
             ViewError::Unknown,
             1u8,
             self.addresses.len() as u8,
-            shows_threshold(self.addresses.len()) as u8
+            shows_threshold(self.addresses.len()) as u8,
+            (self.locktime != 0) as u8
         )
     }
 
@@ -146,9 +152,11 @@ impl SECPTransferOutput<'_> {
         use bolos::{pic_str, PIC};
 
         let mut buffer = [0; U64_FORMATTED_SIZE + 2 + AVAX_TO_LEN];
-        // amount first, then the addresses, then the threshold
+        // amount first, then the addresses, the threshold and the locktime
         let addr_item_n = 1u8;
         let threshold_item_n = addr_item_n + self.addresses.len() as u8;
+        let locktime_item_n =
+            threshold_item_n + shows_threshold(self.addresses.len()) as u8;
 
         match item_n {
             0 => {
@@ -174,6 +182,12 @@ impl SECPTransferOutput<'_> {
             }
             x if x == threshold_item_n && shows_threshold(self.addresses.len()) => {
                 render_threshold(self.threshold, self.addresses.len(), title, message, page)
+            }
+            // The output cannot be spent before this date. Without the screen
+            // funds sent to the user, or their change, could be locked for
+            // years and the review would look the same.
+            x if x == locktime_item_n && self.locktime != 0 => {
+                render_locktime(pic_str!(b"Locked until"), self.locktime, title, message, page)
             }
             _ => Err(ViewError::NoData),
         }

@@ -13,6 +13,7 @@
 *  See the License for the specific language governing permissions and
 *  limitations under the License.
 ********************************************************************************/
+use core::convert::TryFrom;
 use core::ops::Deref;
 
 use core::{mem::MaybeUninit, ptr::addr_of_mut};
@@ -20,8 +21,8 @@ use nom::{bytes::complete::take, number::complete::be_u32};
 use zemu_sys::ViewError;
 
 use crate::parser::{
-    DisplayableItem, FromBytes, ObjectList, Output, OutputIdx, ParserError, TransferableInput,
-    TransferableOutput,
+    DisplayableItem, FromBytes, Header, NetworkId, ObjectList, Output, OutputIdx, ParserError,
+    TransferableInput, TransferableOutput,
 };
 
 pub const MAX_MEMO_LEN: usize = 256;
@@ -45,12 +46,19 @@ where
     // it generic over any input-type, in the maintenance cycle
     pub inputs: ObjectList<'b, TransferableInput<'b>>,
     pub memo: &'b [u8],
+    // network id from the transaction header, to tell which outputs are AVAX
+    network_id: u32,
 }
 
 impl<'b, O> BaseTxFields<'b, O>
 where
     O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
 {
+    /// The AVAX asset id on this transaction's network, if it is known.
+    pub fn avax_asset_id(&self) -> Option<&'static [u8; 32]> {
+        NetworkId::try_from(self.network_id).ok()?.avax_asset_id()
+    }
+
     pub fn disable_output_if(&mut self, address: &[u8]) {
         // skip filtering out outputs if there is only one
         let num_outs = self.outputs.iter().count();
@@ -66,15 +74,14 @@ where
     pub fn force_disable_output(&mut self, address: &[u8]) {
         let mut idx = 0;
         let mut render = self.renderable_out;
+        let avax = self.avax_asset_id();
 
         // outputs is define as an Object List of TransferableOutputs,
         // when parsing transactions we ensure that it is not longer than
         // 64, as we use that value as a limit for the bitwise operation,
         // this ensures that render ^= 1 << idx never overflows.
         self.outputs.iterate_with(|o| {
-            // The 99.99% of the outputs contain only one address(best case),
-            // In the worse case we just show every output.
-            if o.num_addresses() == 1 && o.contain_address(address) {
+            if o.is_hideable_change(address, avax) {
                 render ^= 1 << idx;
             }
             idx += 1;
@@ -188,12 +195,18 @@ where
     }
 }
 
-impl<'b, O> FromBytes<'b> for BaseTxFields<'b, O>
+impl<'b, O> BaseTxFields<'b, O>
 where
     O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
 {
+    /// Parse the base fields that follow `header` in a transaction.
+    ///
+    /// The header is needed to know the network, and so which asset is
+    /// AVAX: only AVAX outputs may be hidden as change. There is deliberately
+    /// no FromBytes impl, so no transaction can parse these fields without it.
     #[inline(never)]
-    fn from_bytes_into(
+    pub fn from_bytes_after(
+        header: &Header<'_>,
         input: &'b [u8],
         out: &mut MaybeUninit<Self>,
     ) -> Result<&'b [u8], nom::Err<ParserError>> {
@@ -227,6 +240,7 @@ where
         //good ptr and no uninit reads
         unsafe {
             addr_of_mut!((*out).memo).write(memo);
+            addr_of_mut!((*out).network_id).write(header.network_id);
             // by default all outputs are renderable
             addr_of_mut!((*out).renderable_out).write(OutputIdx::MAX);
         }
@@ -277,5 +291,105 @@ where
             x if x == num_inner_items => obj.render_item(obj_item_n, title, message, page),
             _ => Err(ViewError::NoData),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::parser::tx_builder::*;
+    use crate::parser::{ParserError, Transaction};
+    use std::prelude::v1::*;
+
+    // 2100-01-01 00:00:00 UTC
+    const YEAR_2100: u64 = 4_102_444_800;
+
+    fn ins() -> Vec<Vec<u8>> {
+        vec![input(1, &FUJI_AVAX, 100_000_000_000)]
+    }
+
+    #[test]
+    fn plain_change_is_hidden() {
+        let tx = x_transfer(
+            &[out(10_000_000_000, RECIPIENT), out(89_999_000_000, CHANGE)],
+            &ins(),
+        );
+        let shown = screens(&tx, Some(CHANGE));
+        assert!(!shown.iter().any(|s| s.contains("89.999")), "{:#?}", shown);
+    }
+
+    #[test]
+    fn time_locked_change_is_shown() {
+        // Honest transfer vs one whose change is locked until 2100: the change
+        // used to be hidden either way, so both reviews were identical.
+        let honest = x_transfer(
+            &[out(10_000_000_000, RECIPIENT), out(89_999_000_000, CHANGE)],
+            &ins(),
+        );
+        let locked = x_transfer(
+            &[
+                out(10_000_000_000, RECIPIENT),
+                transferable(&FUJI_AVAX, secp_out(89_999_000_000, YEAR_2100, 1, &[CHANGE])),
+            ],
+            &ins(),
+        );
+        let honest = screens(&honest, Some(CHANGE));
+        let locked = screens(&locked, Some(CHANGE));
+        assert_ne!(honest, locked);
+        assert!(locked.contains(&"Transfer: 89.999 AVAX to ".to_string()), "{:#?}", locked);
+        assert!(locked.contains(&"Locked until: 2100-01-01 00:00:00 UTC".to_string()));
+    }
+
+    #[test]
+    fn stakeable_locked_change_is_shown() {
+        let locked = p_base(
+            &[
+                out(10_000_000_000, RECIPIENT),
+                transferable(
+                    &FUJI_AVAX,
+                    stakeable_locked(YEAR_2100, secp_out(89_999_000_000, 0, 1, &[CHANGE])),
+                ),
+            ],
+            &ins(),
+        );
+        let shown = screens(&locked, Some(CHANGE));
+        assert!(
+            shown.contains(&"Funds locked: 89.999 AVAX until 2100-01-01 00:00:00 UTC".to_string()),
+            "{:#?}",
+            shown
+        );
+    }
+
+    #[test]
+    fn change_in_another_asset_is_shown() {
+        let tx = x_transfer(
+            &[
+                out(10_000_000_000, RECIPIENT),
+                transferable(&OTHER_ASSET, secp_out(5, 0, 1, &[CHANGE])),
+                out(89_999_000_000, CHANGE),
+            ],
+            &[input(1, &FUJI_AVAX, 100_000_000_000), input(2, &OTHER_ASSET, 5)],
+        );
+        let shown = screens(&tx, Some(CHANGE));
+        // the AVAX change is hidden, the other asset's is not
+        assert!(!shown.iter().any(|s| s.contains("89.999")), "{:#?}", shown);
+        assert!(shown.iter().any(|s| s.starts_with("Transfer: 0.000000005")), "{:#?}", shown);
+    }
+
+    #[test]
+    fn locktime_is_shown_on_every_output() {
+        let tx = x_transfer(
+            &[transferable(&FUJI_AVAX, secp_out(10_000_000_000, YEAR_2100, 1, &[RECIPIENT]))],
+            &ins(),
+        );
+        assert!(screens(&tx, None).contains(&"Locked until: 2100-01-01 00:00:00 UTC".to_string()));
+    }
+
+    #[test]
+    fn locktime_past_date_table_is_rejected() {
+        let tx = x_transfer(
+            &[transferable(&FUJI_AVAX, secp_out(10_000_000_000, u64::MAX, 1, &[RECIPIENT]))],
+            &ins(),
+        );
+        assert_eq!(Transaction::new(&tx).unwrap_err(), ParserError::InvalidTimestamp);
     }
 }

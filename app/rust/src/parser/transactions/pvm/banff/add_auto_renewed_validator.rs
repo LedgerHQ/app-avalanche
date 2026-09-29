@@ -74,7 +74,11 @@ impl<'b> FromBytes<'b> for AddAutoRenewedValidatorTx<'b> {
 
         // base_tx
         let base_tx = unsafe { &mut *addr_of_mut!((*out).base_tx).cast() };
-        let rem = BaseTxFields::<PvmOutput>::from_bytes_into(rem, base_tx)?;
+        let rem = BaseTxFields::<PvmOutput>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_tx,
+        )?;
         crate::sys::zemu_log_stack("AutoRenewed::base_tx ok\x00");
 
         // node_id: avalanchego types it as a JSONByteSlice ([]byte), so the codec
@@ -212,9 +216,10 @@ impl<'b> AddAutoRenewedValidatorTx<'b> {
 
         let mut idx = 0;
         let mut render = self.renderable_out;
+        let avax = self.tx_header.avax_asset_id();
 
         self.stake.iterate_with(|o| {
-            if o.num_addresses() == 1 && o.contain_address(address) {
+            if o.is_hideable_change(address, avax) {
                 render ^= 1 << idx;
             }
             idx += 1;

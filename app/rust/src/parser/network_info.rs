@@ -46,6 +46,20 @@ impl NetworkId {
     }
 }
 
+impl NetworkId {
+    /// The AVAX asset id on this network, or None where it is not fixed.
+    pub fn avax_asset_id(&self) -> Option<&'static [u8; 32]> {
+        use bolos::PIC;
+
+        match self {
+            Self::Mainnet => Some(PIC::new(&AVAX_ASSET_ID_MAINNET).into_inner()),
+            Self::Fuji => Some(PIC::new(&AVAX_ASSET_ID_FUJI).into_inner()),
+            Self::Local => Some(PIC::new(&AVAX_ASSET_ID_LOCAL).into_inner()),
+            Self::Custom | Self::Devnet => None,
+        }
+    }
+}
+
 impl TryFrom<u32> for NetworkId {
     type Error = ParserError;
 

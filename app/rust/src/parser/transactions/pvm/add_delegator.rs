@@ -64,7 +64,11 @@ impl<'b> FromBytes<'b> for AddDelegatorTx<'b> {
 
         // base_tx
         let base_tx = unsafe { &mut *addr_of_mut!((*out).base_tx).cast() };
-        let rem = BaseTxFields::<PvmOutput>::from_bytes_into(rem, base_tx)?;
+        let rem = BaseTxFields::<PvmOutput>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_tx,
+        )?;
 
         // validator
         let validator = unsafe { &mut *addr_of_mut!((*out).validator).cast() };
@@ -165,15 +169,14 @@ impl<'b> AddDelegatorTx<'b> {
 
         let mut idx = 0;
         let mut render = self.renderable_out;
+        let avax = self.tx_header.avax_asset_id();
 
         // stake is defined as an Object List of TransferableOutputs,
         // when parsing transactions we ensure that it is not longer than
         // 64, as we use that value as a limit for the bitwise operation,
         // this ensures that render ^= 1 << idx never overflows.
         self.stake.iterate_with(|o| {
-            // The 99.99% of the outputs contain only one address(best case),
-            // In the worse case we just show every output.
-            if o.num_addresses() == 1 && o.contain_address(address) {
+            if o.is_hideable_change(address, avax) {
                 render ^= 1 << idx;
             }
             idx += 1;
@@ -457,6 +460,48 @@ mod tests {
     fn parse_add_delegator() {
         let (_, tx) = AddDelegatorTx::from_bytes(DATA).unwrap();
         assert_eq!(tx.validator.stake(), 2000000000000);
+    }
+
+    #[test]
+    fn locked_change_and_stake_are_not_hidden() {
+        use crate::parser::tx_builder::*;
+        use std::prelude::v1::*;
+
+        // 2100-01-01 00:00:00 UTC
+        const YEAR_2100: u64 = 4_102_444_800;
+        let ins = [input(1, &FUJI_AVAX, 100_000_000_000)];
+        let rewards = || owners(0, 1, &[CHANGE]);
+
+        let honest = add_delegator(
+            &[out(89_999_000_000, CHANGE)],
+            &ins,
+            &[out(10_000_000_000, CHANGE)],
+            rewards(),
+        );
+        // The lone change output stakeable-locked until 2100, and the stake
+        // coming back time-locked until 2100: both used to be hidden as
+        // change, so the review was the same as the honest one.
+        let attack = add_delegator(
+            &[transferable(
+                &FUJI_AVAX,
+                stakeable_locked(YEAR_2100, secp_out(89_999_000_000, 0, 1, &[CHANGE])),
+            )],
+            &ins,
+            &[transferable(&FUJI_AVAX, secp_out(10_000_000_000, YEAR_2100, 1, &[CHANGE]))],
+            rewards(),
+        );
+
+        let honest = screens(&honest, Some(CHANGE));
+        let attack = screens(&attack, Some(CHANGE));
+        assert!(!honest.iter().any(|s| s.starts_with("Transfer: ")), "{:#?}", honest);
+        assert!(!honest.iter().any(|s| s.starts_with("Stake: ")), "{:#?}", honest);
+
+        assert!(attack.contains(&"Transfer: 89.999 AVAX to ".to_string()), "{:#?}", attack);
+        assert!(attack.contains(
+            &"Funds locked: 89.999 AVAX until 2100-01-01 00:00:00 UTC".to_string()
+        ));
+        assert!(attack.contains(&"Stake: 10 AVAX to ".to_string()), "{:#?}", attack);
+        assert!(attack.contains(&"Locked until: 2100-01-01 00:00:00 UTC".to_string()));
     }
 
     #[test]

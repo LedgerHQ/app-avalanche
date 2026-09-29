@@ -81,7 +81,11 @@ impl<'b> FromBytes<'b> for TransformSubnetTx<'b> {
         let rem = Header::from_bytes_into(rem, tx_header)?;
 
         let base_tx = unsafe { &mut *addr_of_mut!((*out).base_tx).cast() };
-        let rem = BaseTxFields::<PvmOutput>::from_bytes_into(rem, base_tx)?;
+        let rem = BaseTxFields::<PvmOutput>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_tx,
+        )?;
 
         let subnet_id = unsafe { &mut *addr_of_mut!((*out).subnet_id).cast() };
         let rem = SubnetId::from_bytes_into(rem, subnet_id)?;

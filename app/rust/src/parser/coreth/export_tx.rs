@@ -118,15 +118,14 @@ impl<'b> ExportTx<'b> {
 
         let mut idx = 0;
         let mut render = self.renderable_out;
+        let avax = self.tx_header.avax_asset_id();
 
         // outputs is define as an Object List of TransferableOutputs,
         // when parsing transactions we ensure that it is not longer than
         // 64, as we use that value as a limit for the bitwise operation,
         // this ensures that render ^= 1 << idx never overflows.
         self.outputs.iterate_with(|o| {
-            // The 99.99% of the outputs contain only one address(best case),
-            // In the worse case we just show every output.
-            if o.num_addresses() == 1 && o.contain_address(address) {
+            if o.is_hideable_change(address, avax) {
                 render ^= 1 << idx;
             }
             idx += 1;

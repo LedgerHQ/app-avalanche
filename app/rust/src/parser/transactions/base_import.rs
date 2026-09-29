@@ -65,7 +65,11 @@ where
 
         // base_tx
         let base_tx = unsafe { &mut *addr_of_mut!((*out).base_tx).cast() };
-        let rem = BaseTxFields::<O>::from_bytes_into(rem, base_tx)?;
+        let rem = BaseTxFields::<O>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_tx,
+        )?;
 
         let (rem, source_chain) = take(SOURCE_CHAIN_LEN)(rem)?;
         let source_chain = arrayref::array_ref!(source_chain, 0, SOURCE_CHAIN_LEN);

@@ -24,7 +24,10 @@ use zemu_sys::ViewError;
 use crate::{
     checked_add,
     handlers::handle_ui_message,
-    parser::{Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES},
+    parser::{
+        outputs::{check_locktime, render_locktime},
+        Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES,
+    },
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -82,6 +85,9 @@ impl<'b> FromBytes<'b> for SECPMintOutput<'b> {
         if threshold == 0 || threshold as usize > addresses.len() {
             return Err(ParserError::InvalidThreshold.into());
         }
+
+        // the locktime is shown as a date
+        check_locktime(locktime)?;
 
         //good ptr and no uninit reads
         let out = out.as_mut_ptr();
@@ -145,11 +151,7 @@ impl SECPMintOutput<'_> {
             }
 
             1 if self.locktime > 0 => {
-                let title_content = pic_str!(b"Locktime");
-                title[..title_content.len()].copy_from_slice(title_content);
-                let buffer = itoa_buffer.format(self.locktime);
-
-                handle_ui_message(buffer.as_bytes(), message, page)
+                render_locktime(pic_str!(b"Locktime"), self.locktime, title, message, page)
             }
 
             x @ 1.. if (x == 1 && self.locktime == 0) || (x == 2 && self.locktime > 0) => {

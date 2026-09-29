@@ -25,7 +25,7 @@ use crate::{
     checked_add,
     handlers::handle_ui_message,
     parser::{
-        outputs::{render_threshold, shows_threshold},
+        outputs::{check_locktime, render_locktime, render_threshold, shows_threshold},
         u32_to_str, Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES,
         U32_FORMATTED_SIZE,
     },
@@ -98,6 +98,9 @@ impl<'b> NFTTransferOutput<'b> {
             return Err(ParserError::InvalidThreshold.into());
         }
 
+        // the locktime is shown as a date
+        check_locktime(locktime)?;
+
         //good ptr and no uninit reads
         let out = out.as_mut_ptr();
 
@@ -129,12 +132,14 @@ impl<'b> FromBytes<'b> for NFTTransferOutput<'b> {
 
 impl DisplayableItem for NFTTransferOutput<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        // group_id, payload, addresses and, with several, the threshold
+        // group_id, payload, addresses and, with several, the threshold, and
+        // when the NFT is time-locked, the date it unlocks
         checked_add!(
             ViewError::Unknown,
             2u8,
             self.num_addresses() as u8,
-            shows_threshold(self.num_addresses()) as u8
+            shows_threshold(self.num_addresses()) as u8,
+            (self.locktime != 0) as u8
         )
     }
 
@@ -230,6 +235,12 @@ impl NFTTransferOutput<'_> {
             }
             x if x == self.num_addresses() + 2 && shows_threshold(self.num_addresses()) => {
                 render_threshold(self.threshold, self.num_addresses(), title, message, page)
+            }
+            // the NFT cannot move before this date; it used to go unshown
+            x if x == self.num_addresses() + 2 + shows_threshold(self.num_addresses()) as usize
+                && self.locktime != 0 =>
+            {
+                render_locktime(pic_str!(b"Locked until"), self.locktime, title, message, page)
             }
             _ => Err(ViewError::NoData),
         }

@@ -62,7 +62,11 @@ impl<'b> FromBytes<'b> for AddValidatorTx<'b> {
 
         // base_tx
         let base_tx = unsafe { &mut *addr_of_mut!((*out).base_tx).cast() };
-        let rem = BaseTxFields::<PvmOutput>::from_bytes_into(rem, base_tx)?;
+        let rem = BaseTxFields::<PvmOutput>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_tx,
+        )?;
 
         // validator
         let validator = unsafe { &mut *addr_of_mut!((*out).validator).cast() };
@@ -178,15 +182,14 @@ impl<'b> AddValidatorTx<'b> {
 
         let mut idx = 0;
         let mut render = self.renderable_out;
+        let avax = self.tx_header.avax_asset_id();
 
         // stake is defined as an Object List of TransferableOutputs,
         // when parsing transactions we ensure that it is not longer than
         // 64, as we use that value as a limit for the bitwise operation,
         // this ensures that render ^= 1 << idx never overflows.
         self.stake.iterate_with(|o| {
-            // The 99.99% of the outputs contain only one address(best case),
-            // In the worse case we just show every output.
-            if o.num_addresses() == 1 && o.contain_address(address) {
+            if o.is_hideable_change(address, avax) {
                 render ^= 1 << idx;
             }
             idx += 1;

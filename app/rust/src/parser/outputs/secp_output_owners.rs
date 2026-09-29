@@ -25,9 +25,9 @@ use crate::{
     checked_add,
     handlers::handle_ui_message,
     parser::{
-        outputs::{render_threshold, shows_threshold},
-        u64_to_str, Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN,
-        MAX_ADDRESSES, MAX_ADDRESS_ENCODED_LEN, U64_FORMATTED_SIZE
+        outputs::{check_locktime, render_locktime, render_threshold, shows_threshold},
+        Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN,
+        MAX_ADDRESSES, MAX_ADDRESS_ENCODED_LEN,
     },
 };
 
@@ -107,6 +107,9 @@ impl<'b> FromBytes<'b> for SECPOutputOwners<'b> {
             return Err(ParserError::InvalidThreshold.into());
         }
 
+        // the locktime is shown as a date
+        check_locktime(locktime)?;
+
         //good ptr and no uninit reads
         let out = out.as_mut_ptr();
         unsafe {
@@ -153,18 +156,14 @@ impl SECPOutputOwners<'_> {
     ) -> Result<u8, ViewError> {
         use bolos::{pic_str, PIC};
 
-        let mut buffer = [0; U64_FORMATTED_SIZE + 2];
-
         let addr_items = self.addresses.len() as u8;
         let mut item_index = item_n;
 
         if self.locktime > 0 {
             if item_index == 0 {
-                let title_content = pic_str!(b"Locktime");
-                title[..title_content.len()].copy_from_slice(title_content);
-                let buffer =
-                    u64_to_str(self.locktime, &mut buffer).map_err(|_| ViewError::Unknown)?;
-                return handle_ui_message(buffer, message, page);
+                // a date, not the raw unix time it used to be
+                let label = pic_str!(b"Locktime");
+                return render_locktime(label, self.locktime, title, message, page);
             }
             item_index -= 1;
         }

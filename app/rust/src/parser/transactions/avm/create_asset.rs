@@ -83,7 +83,11 @@ impl<'b> FromBytes<'b> for CreateAssetTx<'b> {
 
         // base_tx
         let base_tx = unsafe { &mut *addr_of_mut!((*out).base_tx).cast() };
-        let rem = BaseTxFields::<AvmOutput>::from_bytes_into(rem, base_tx)?;
+        let rem = BaseTxFields::<AvmOutput>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_tx,
+        )?;
 
         // name
         let (rem, name_len) = be_u16(rem)?;

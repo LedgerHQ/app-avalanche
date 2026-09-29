@@ -12,6 +12,7 @@ input_file: src/parser/testvectors/x_create_asset.json
     "Address": "fuji12yp9cc0melq83a5nxnurf0nd6fk4t224unmnwx",
     "Address": "fuji1cv6yz28qvqfgah34yw3y53su39p6kzzehw5pj3",
     "Threshold": "1 of 2",
+    "Locked until": "1970-01-01 15:05:21 UTC",
     "Fee(AVAX)": "0.123444444",
     "Memo": "00010203",
 ]

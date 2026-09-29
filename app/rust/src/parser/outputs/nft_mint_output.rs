@@ -25,7 +25,8 @@ use crate::{
     checked_add,
     handlers::handle_ui_message,
     parser::{
-        u32_to_str, u64_to_str, Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN,
+        outputs::{check_locktime, render_locktime},
+        u32_to_str, Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN,
         MAX_ADDRESSES, U64_FORMATTED_SIZE,
     },
 };
@@ -87,6 +88,9 @@ impl<'b> FromBytes<'b> for NFTMintOutput<'b> {
             return Err(ParserError::InvalidThreshold.into());
         }
 
+        // the locktime is shown as a date
+        check_locktime(locktime)?;
+
         //good ptr and no uninit reads
         let out = out.as_mut_ptr();
 
@@ -141,10 +145,10 @@ impl NFTMintOutput<'_> {
 
         let mut buffer = [0; U64_FORMATTED_SIZE + 2];
         let addr_item_n = self.num_items()? - self.addresses.len() as u8;
-        let render_locktime = self.locktime > 0;
+        let shows_locktime = self.locktime > 0;
         // Gets the page at which this field is displayed, by summing the boolean
         // directly since it offsets the pages by 1 if present
-        let render_threshold_at = 2 + render_locktime as u8;
+        let render_threshold_at = 2 + shows_locktime as u8;
 
         match item_n {
             0 => {
@@ -161,13 +165,8 @@ impl NFTMintOutput<'_> {
 
                 handle_ui_message(buffer, message, page)
             }
-            2 if render_locktime => {
-                let title_content = pic_str!(b"Locktime");
-                title[..title_content.len()].copy_from_slice(title_content);
-                let buffer =
-                    u64_to_str(self.locktime, &mut buffer).map_err(|_| ViewError::Unknown)?;
-
-                handle_ui_message(buffer, message, page)
+            2 if shows_locktime => {
+                render_locktime(pic_str!(b"Locktime"), self.locktime, title, message, page)
             }
             x @ 2.. if x == render_threshold_at => {
                 let title_content = pic_str!(b"Threshold");

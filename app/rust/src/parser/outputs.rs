@@ -17,7 +17,6 @@ use core::ops::Deref;
 
 use crate::parser::{Address, AssetId, DisplayableItem, FromBytes, ParserError};
 use crate::sys::ViewError;
-use crate::utils::ApduPanic;
 use core::{mem::MaybeUninit, ptr::addr_of_mut};
 
 mod nft_mint_output;
@@ -30,6 +29,30 @@ pub use nft_transfer_output::NFTTransferOutput;
 pub use secp_mint_output::SECPMintOutput;
 pub use secp_output_owners::SECPOutputOwners;
 pub use secp_transfer_output::SECPTransferOutput;
+
+/// Refuse at parse time a non-zero locktime the date formatter cannot show
+/// (past the end of its year table, 2369), so that its screen always renders.
+pub(crate) fn check_locktime(locktime: u64) -> Result<(), ParserError> {
+    if locktime != 0 {
+        crate::parser::timestamp_to_date(locktime).map_err(|_| ParserError::InvalidTimestamp)?;
+    }
+    Ok(())
+}
+
+/// Render a locktime screen titled `label`, with the locktime as a UTC date.
+/// The locktime must have passed check_locktime.
+pub(crate) fn render_locktime(
+    label: &[u8],
+    locktime: u64,
+    title: &mut [u8],
+    message: &mut [u8],
+    page: u8,
+) -> Result<u8, ViewError> {
+    title[..label.len()].copy_from_slice(label);
+
+    let date = crate::parser::timestamp_to_str_date(locktime).map_err(|_| ViewError::Unknown)?;
+    crate::handlers::handle_ui_message(date.as_slice(), message, page)
+}
 
 /// Whether an owner set needs a Threshold screen: with a single address the
 /// only valid threshold is 1, so the screen would say nothing.
@@ -134,21 +157,39 @@ where
         }
     }
 
-    // Any output whose address match any of the
-    // paths in the change_path list should not be
-    // rendered, unless the output contains more
-    // than one address, in that case the output
-    // would be rendered along with each of its addresses.
-    pub fn contain_address(&self, change_address: &[u8]) -> bool {
-        let num_address = self.output().num_addresses();
-        for idx in 0..num_address {
-            let address = self.output().get_address(idx).apdu_unwrap();
-            if address.raw_address() == change_address {
-                return true;
-            }
-        }
-        false
+    /// Whether this output may be left off the review as change to
+    /// `change_address`, on a network whose AVAX asset id is `avax_asset`.
+    ///
+    /// Only an output the user fully and immediately controls may go
+    /// unreviewed: a plain secp transfer output (not wrapped in a
+    /// stakeable lock), with locktime 0, threshold 1 and `change_address` as
+    /// its only address, of the network's AVAX asset. Any of those being
+    /// different is something the user has to see: funds locked for years,
+    /// shared with another key, or in another asset.
+    pub fn is_hideable_change(
+        &self,
+        change_address: &[u8],
+        avax_asset: Option<&[u8; 32]>,
+    ) -> bool {
+        let Some(secp) = self.output().secp_transfer() else {
+            return false;
+        };
+
+        // A wrapper that adds screens of its own around the inner output
+        // (PvmOutput adds the stakeable-lock line) is never plain change.
+        let plain = match (self.output.num_items(), self.output().num_items()) {
+            (Ok(outer), Ok(inner)) => outer == inner,
+            _ => false,
+        };
+
+        plain
+            && secp.locktime == 0
+            && secp.threshold == 1
+            && secp.addresses.len() == 1
+            && secp.addresses[0][..] == *change_address
+            && avax_asset == Some(self.asset_id.id())
     }
+
 }
 
 impl<'b, O> FromBytes<'b> for TransferableOutput<'b, O>
@@ -452,6 +493,68 @@ mod tests {
             assert_eq!(SECPMintOutput::from_bytes(&secp_mint).is_ok(), valid);
             assert_eq!(NFTMintOutput::from_bytes(&nft_mint).is_ok(), valid);
             assert_eq!(NFTTransferOutput::from_bytes(&nft_transfer).is_ok(), valid);
+        }
+    }
+
+    #[test]
+    fn nft_mint_and_owner_locktimes_are_dates() {
+        use crate::parser::tx_builder::{render_all, RECIPIENT};
+        use std::prelude::v1::*;
+
+        // 2100-01-01 00:00:00 UTC
+        const YEAR_2100: u64 = 4_102_444_800;
+        const DATE: &str = "2100-01-01 00:00:00 UTC";
+
+        fn owners(locktime: u64) -> Vec<u8> {
+            let mut v = locktime.to_be_bytes().to_vec();
+            v.extend(1u32.to_be_bytes());
+            v.extend(1u32.to_be_bytes());
+            v.extend(RECIPIENT);
+            v
+        }
+        let with_type = |type_id: u32, group: Option<u32>, payload: bool, locktime: u64| {
+            let mut v = type_id.to_be_bytes().to_vec();
+            if let Some(g) = group {
+                v.extend(g.to_be_bytes());
+            }
+            if payload {
+                v.extend(2u32.to_be_bytes());
+                v.extend(b"hi");
+            }
+            v.extend(owners(locktime));
+            v
+        };
+
+        // An NFT transfer output's locktime was never shown at all
+        let nft = with_type(NFTTransferOutput::TYPE_ID, Some(7), true, YEAR_2100);
+        let screens = render_all(&NFTTransferOutput::from_bytes(&nft).unwrap().1);
+        assert_eq!(screens.last().unwrap(), &format!("Locked until: {}", DATE));
+
+        // mint outputs and owners showed it as a raw unix time
+        let mint = with_type(SECPMintOutput::TYPE_ID, None, false, YEAR_2100);
+        let screens = render_all(&SECPMintOutput::from_bytes(&mint).unwrap().1);
+        assert!(screens.contains(&format!("Locktime: {}", DATE)), "{:#?}", screens);
+
+        let nft_mint = with_type(NFTMintOutput::TYPE_ID, Some(7), false, YEAR_2100);
+        let screens = render_all(&NFTMintOutput::from_bytes(&nft_mint).unwrap().1);
+        assert!(screens.contains(&format!("Locktime: {}", DATE)), "{:#?}", screens);
+
+        let owner = with_type(SECPOutputOwners::TYPE_ID, None, false, YEAR_2100);
+        let screens = render_all(&SECPOutputOwners::from_bytes(&owner).unwrap().1);
+        assert!(screens.contains(&format!("Locktime: {}", DATE)), "{:#?}", screens);
+
+        // and a locktime the date formatter cannot show is refused by all four
+        let nft = with_type(NFTTransferOutput::TYPE_ID, Some(7), true, u64::MAX);
+        let mint = with_type(SECPMintOutput::TYPE_ID, None, false, u64::MAX);
+        let nft_mint = with_type(NFTMintOutput::TYPE_ID, Some(7), false, u64::MAX);
+        let owner = with_type(SECPOutputOwners::TYPE_ID, None, false, u64::MAX);
+        for err in [
+            NFTTransferOutput::from_bytes(&nft).map(|_| ()),
+            SECPMintOutput::from_bytes(&mint).map(|_| ()),
+            NFTMintOutput::from_bytes(&nft_mint).map(|_| ()),
+            SECPOutputOwners::from_bytes(&owner).map(|_| ()),
+        ] {
+            assert_eq!(err.unwrap_err(), ParserError::InvalidTimestamp.into());
         }
     }
 
