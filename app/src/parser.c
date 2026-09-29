@@ -32,17 +32,17 @@ static zxerr_t parser_allocate(parser_tx_t *parser_state);
 // This buffer will store parser_state.
 // Its size corresponds to ParsedObj (Rust struct)
 // Maximum required size: 256 bytes
+// Aligned for the Rust Transaction, which holds u64 fields.
 #define PARSER_BUFFER_SIZE 256
-static uint8_t parser_buffer[PARSER_BUFFER_SIZE];
+static uint8_t parser_buffer[PARSER_BUFFER_SIZE] __attribute__((aligned(8)));
 
 // This function is used to allocate memory for the parser state
 zxerr_t parser_allocate(parser_tx_t *parser_state) {
-    if (parser_state->len % 4 != 0) {
-        parser_state->len += parser_state->len % 4;
-    }
     if (parser_state->len > PARSER_BUFFER_SIZE) {
         return zxerr_buffer_too_small;
     }
+    // round up to a multiple of 4, still within the buffer
+    parser_state->len = (parser_state->len + 3) & ~3u;
     if (parser_state->state != NULL) {
         return zxerr_unknown;
     }
