@@ -17,8 +17,7 @@ use crate::checked_add;
 use crate::handlers::handle_ui_message;
 use crate::parser::{
     nano_avax_to_fp_str, AvmOutput, BaseTxFields, ChainId, DisplayableItem, FromBytes, Header,
-    ObjectList, ParserError, TransferableOp, AVM_OPERATION_TX, MAX_ADDRESS_ENCODED_LEN,
-    U64_FORMATTED_SIZE,
+    ObjectList, ParserError, TransferableOp, AVM_OPERATION_TX, U64_FORMATTED_SIZE,
 };
 use core::{mem::MaybeUninit, ptr::addr_of_mut};
 use nom::bytes::complete::tag;
@@ -134,27 +133,10 @@ impl<'b> OperationTx<'b> {
                 res
             }
 
+            // addresses, then the threshold when there are several
             x @ 1.. if x < num_inner_items => {
-                let addr_idx = x - 1;
-                // Operations only supports secp_transfer outputs
-                let obj = obj.secp_transfer().ok_or(ViewError::NoData)?;
-
-                let address = obj
-                    .get_address_at(addr_idx as usize)
-                    .ok_or(ViewError::NoData)?;
-
-                // render encoded address with proper hrp,
-                let t = pic_str!(b"Address");
-                title[..t.len()].copy_from_slice(t);
-
                 let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
-                let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
-
-                let addr_len = address
-                    .encode_into(hrp, &mut encoded[..])
-                    .map_err(|_| ViewError::Unknown)?;
-
-                handle_ui_message(&encoded[..addr_len], message, page)
+                obj.render_item_with_hrp(hrp, x, title, message, page)
             }
 
             _ => Err(ViewError::NoData),

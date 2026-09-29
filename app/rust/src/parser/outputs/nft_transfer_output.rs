@@ -25,6 +25,7 @@ use crate::{
     checked_add,
     handlers::handle_ui_message,
     parser::{
+        outputs::{render_threshold, shows_threshold},
         u32_to_str, Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES,
         U32_FORMATTED_SIZE,
     },
@@ -128,8 +129,13 @@ impl<'b> FromBytes<'b> for NFTTransferOutput<'b> {
 
 impl DisplayableItem for NFTTransferOutput<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        // group_id, payload and addresses
-        checked_add!(ViewError::Unknown, 2u8, self.num_addresses() as u8)
+        // group_id, payload, addresses and, with several, the threshold
+        checked_add!(
+            ViewError::Unknown,
+            2u8,
+            self.num_addresses() as u8,
+            shows_threshold(self.num_addresses()) as u8
+        )
     }
 
     #[inline(never)]
@@ -222,6 +228,9 @@ impl NFTTransferOutput<'_> {
                     Err(ViewError::NoData)
                 }
             }
+            x if x == self.num_addresses() + 2 && shows_threshold(self.num_addresses()) => {
+                render_threshold(self.threshold, self.num_addresses(), title, message, page)
+            }
             _ => Err(ViewError::NoData),
         }
     }
@@ -237,6 +246,23 @@ mod tests {
         22, 54, 119, 75, 103, 131, 141, 236, 22, 225, 106, 182, 207, 172, 178, 27, 136, 195, 168,
         97,
     ];
+
+    #[test]
+    fn multisig_nft_output_shows_its_threshold() {
+        use crate::parser::tx_builder::{render_all, ATTACKER, RECIPIENT};
+        use std::prelude::v1::*;
+
+        let mut data = vec![0, 0, 0, 11, 0, 0, 0, 1, 0, 0, 0, 2, b'h', b'i'];
+        data.extend(0u64.to_be_bytes());
+        data.extend(1u32.to_be_bytes());
+        data.extend(2u32.to_be_bytes());
+        data.extend(RECIPIENT);
+        data.extend(ATTACKER);
+
+        let out = NFTTransferOutput::from_bytes(&data).unwrap().1;
+        assert_eq!(out.num_items().unwrap(), 5);
+        assert_eq!(render_all(&out).last().unwrap(), "Threshold: 1 of 2");
+    }
 
     #[test]
     fn parse_nft_transf_output() {

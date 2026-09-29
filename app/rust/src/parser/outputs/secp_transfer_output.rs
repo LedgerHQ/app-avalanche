@@ -24,7 +24,12 @@ use zemu_sys::ViewError;
 use crate::{
     checked_add,
     handlers::handle_ui_message,
-    parser::{nano_avax_to_fp_str, Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES, U64_FORMATTED_SIZE},
+    parser::{
+        nano_avax_to_fp_str,
+        outputs::{render_threshold, shows_threshold},
+        Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES,
+        U64_FORMATTED_SIZE,
+    },
 };
 
 const AVAX_TO_LEN: usize = 9; //b" AVAX to "
@@ -105,8 +110,13 @@ impl DisplayableItem for SECPTransferOutput<'_> {
         // we should summarize the items to show. As they suggested we only show the amount
         // and address. Legacy app errors if there is more than 1 address, in our case we dont yet.
         //
-        // amount and addresses
-        checked_add!(ViewError::Unknown, 1u8, self.addresses.len() as u8)
+        // amount, addresses and, with several addresses, the threshold
+        checked_add!(
+            ViewError::Unknown,
+            1u8,
+            self.addresses.len() as u8,
+            shows_threshold(self.addresses.len()) as u8
+        )
     }
 
     fn render_item(
@@ -136,7 +146,9 @@ impl SECPTransferOutput<'_> {
         use bolos::{pic_str, PIC};
 
         let mut buffer = [0; U64_FORMATTED_SIZE + 2 + AVAX_TO_LEN];
-        let addr_item_n = self.num_items()? - self.addresses.len() as u8;
+        // amount first, then the addresses, then the threshold
+        let addr_item_n = 1u8;
+        let threshold_item_n = addr_item_n + self.addresses.len() as u8;
 
         match item_n {
             0 => {
@@ -155,10 +167,13 @@ impl SECPTransferOutput<'_> {
                 handle_ui_message(&buffer[..(len + avax_to.len())], message, page)
             }
 
-            x @ 1.. if x >= addr_item_n => {
+            x @ 1.. if x < threshold_item_n => {
                 let idx = x - addr_item_n;
                 let addr = self.get_address_at(idx as usize).ok_or(ViewError::NoData)?;
                 addr.render_with_hrp(hrp, title, message, page)
+            }
+            x if x == threshold_item_n && shows_threshold(self.addresses.len()) => {
+                render_threshold(self.threshold, self.addresses.len(), title, message, page)
             }
             _ => Err(ViewError::NoData),
         }
@@ -253,6 +268,35 @@ mod tests {
             Transaction::new(&tx).unwrap_err(),
             ParserError::InvalidThreshold
         );
+    }
+
+    #[test]
+    fn multisig_output_shows_its_threshold() {
+        use crate::parser::tx_builder::*;
+        use std::prelude::v1::*;
+
+        // A 1-of-2 output to [recipient, attacker] let the attacker spend it
+        // alone, and looked exactly like the 2-of-2 one.
+        let ins = [input(1, &FUJI_AVAX, 100_000_000_000)];
+        let tx = |threshold| {
+            x_transfer(
+                &[transferable(
+                    &FUJI_AVAX,
+                    secp_out(10_000_000_000, 0, threshold, &[RECIPIENT, ATTACKER]),
+                )],
+                &ins,
+            )
+        };
+        let one_of_two = screens(&tx(1), None);
+        let two_of_two = screens(&tx(2), None);
+
+        assert_ne!(one_of_two, two_of_two);
+        assert!(one_of_two.contains(&"Threshold: 1 of 2".to_string()));
+        assert!(two_of_two.contains(&"Threshold: 2 of 2".to_string()));
+
+        // With a single address the threshold can only be 1: no screen.
+        let single = x_transfer(&[out(10_000_000_000, RECIPIENT)], &ins);
+        assert!(!screens(&single, None).iter().any(|s| s.starts_with("Threshold")));
     }
 
     #[test]

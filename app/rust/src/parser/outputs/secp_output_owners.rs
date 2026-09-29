@@ -25,6 +25,7 @@ use crate::{
     checked_add,
     handlers::handle_ui_message,
     parser::{
+        outputs::{render_threshold, shows_threshold},
         u64_to_str, Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN,
         MAX_ADDRESSES, MAX_ADDRESS_ENCODED_LEN, U64_FORMATTED_SIZE
     },
@@ -135,6 +136,23 @@ impl SECPOutputOwners<'_> {
     ) -> Result<u8, ViewError> {
         use bolos::{pic_str, PIC};
 
+        let label = pic_str!(b"Owner address");
+        self.render_item_with_label(hrp, label, item_n, title, message, page)
+    }
+
+    /// Same as render_item_with_hrp, titling the address screens with
+    /// `address_label` (for instance "Rewards to") instead of "Owner address".
+    pub fn render_item_with_label(
+        &self,
+        hrp: &str,
+        address_label: &[u8],
+        item_n: u8,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
+        use bolos::{pic_str, PIC};
+
         let mut buffer = [0; U64_FORMATTED_SIZE + 2];
 
         let addr_items = self.addresses.len() as u8;
@@ -152,9 +170,10 @@ impl SECPOutputOwners<'_> {
         }
 
         if item_index < addr_items {
-            let label = pic_str!(b"Owner address");
-            title[..label.len()].copy_from_slice(label);
+            title[..address_label.len()].copy_from_slice(address_label);
             self.render_address_with_hrp(hrp, item_index as usize, message, page)
+        } else if item_index == addr_items && shows_threshold(self.addresses.len()) {
+            render_threshold(self.threshold, self.addresses.len(), title, message, page)
         } else {
             Err(ViewError::NoData)
         }
@@ -165,9 +184,14 @@ impl DisplayableItem for SECPOutputOwners<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
         // show an item for each address in the list
         let items = self.addresses.len() as u8;
-        // show locktime only if it is higher than zero,
-        // that is why we sum up this boolean
-        checked_add!(ViewError::Unknown, items, (self.locktime > 0) as u8)
+        // show locktime only if it is higher than zero, and the threshold only
+        // with several addresses, that is why we sum up these booleans
+        checked_add!(
+            ViewError::Unknown,
+            items,
+            (self.locktime > 0) as u8,
+            shows_threshold(self.addresses.len()) as u8
+        )
     }
 
     #[inline(never)]
@@ -228,6 +252,33 @@ mod tests {
         assert_eq!(
             Transaction::new(&tx).unwrap_err(),
             ParserError::InvalidThreshold
+        );
+    }
+
+    #[test]
+    fn multisig_owners_show_their_threshold() {
+        use crate::parser::tx_builder::*;
+        use std::prelude::v1::*;
+
+        let raw = owners(0, 1, &[RECIPIENT, ATTACKER]);
+        let (_, owners_1_of_2) = SECPOutputOwners::from_bytes(&raw).unwrap();
+        assert_eq!(owners_1_of_2.num_items().unwrap(), 3);
+        let rendered = render_all(&owners_1_of_2);
+        assert_eq!(rendered.last().unwrap(), "Threshold: 1 of 2");
+
+        // In a transaction: rewards paid to a 1-of-2 owner that includes an
+        // attacker looked the same as rewards to a 2-of-2 one.
+        let ins = [input(1, &FUJI_AVAX, 3_000_000_000_000)];
+        let stake = [out(2_000_000_000_000, CHANGE)];
+        let tx = |threshold| {
+            add_delegator(&[], &ins, &stake, owners(0, threshold, &[CHANGE, ATTACKER]))
+        };
+        let one_of_two = screens(&tx(1), None);
+        assert_ne!(one_of_two, screens(&tx(2), None));
+        assert!(one_of_two.contains(&"Threshold: 1 of 2".to_string()));
+        assert_eq!(
+            one_of_two.iter().filter(|s| s.starts_with("Rewards to: ")).count(),
+            2
         );
     }
 

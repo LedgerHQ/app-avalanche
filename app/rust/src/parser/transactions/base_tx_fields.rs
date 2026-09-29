@@ -13,7 +13,6 @@
 *  See the License for the specific language governing permissions and
 *  limitations under the License.
 ********************************************************************************/
-use bolos::{pic_str, PIC};
 use core::ops::Deref;
 
 use core::{mem::MaybeUninit, ptr::addr_of_mut};
@@ -22,7 +21,7 @@ use zemu_sys::ViewError;
 
 use crate::parser::{
     DisplayableItem, FromBytes, ObjectList, Output, OutputIdx, ParserError, TransferableInput,
-    TransferableOutput, MAX_ADDRESS_ENCODED_LEN,
+    TransferableOutput,
 };
 
 pub const MAX_MEMO_LEN: usize = 256;
@@ -271,21 +270,9 @@ where
 
         match obj_item_n {
             0 => obj.render_item(obj_item_n, title, message, page),
+            // addresses, then the threshold when there are several
             x @ 1.. if x < num_inner_items => {
-                let address_idx = x - 1;
-                let address = inner
-                    .get_address(address_idx as usize)
-                    .ok_or(ViewError::NoData)?;
-
-                let t = pic_str!(b"Address");
-                title[..t.len()].copy_from_slice(t);
-
-                let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
-                let addr_len = address
-                    .encode_into(hrp, &mut encoded[..])
-                    .map_err(|_| ViewError::Unknown)?;
-
-                crate::handlers::handle_ui_message(&encoded[..addr_len], message, page)
+                obj.render_item_with_hrp(hrp, x, title, message, page)
             }
             x if x == num_inner_items => obj.render_item(obj_item_n, title, message, page),
             _ => Err(ViewError::NoData),

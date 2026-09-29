@@ -28,7 +28,7 @@ use crate::{
         intstr_to_fpstr_inplace, nano_avax_to_fp_str, proof_of_possession::BLSSigner, u64_to_str,
         BaseTxFields, DisplayableItem, FromBytes, Header, NodeId, ObjectList, OutputIdx,
         ParserError, PvmOutput, SECPOutputOwners, TransferableOutput, DELEGATION_FEE_DIGITS,
-        MAX_ADDRESS_ENCODED_LEN, NODE_ID_LEN, PVM_ADD_AUTO_RENEWED_VALIDATOR, U64_FORMATTED_SIZE,
+        NODE_ID_LEN, PVM_ADD_AUTO_RENEWED_VALIDATOR, U64_FORMATTED_SIZE,
     },
 };
 
@@ -147,9 +147,9 @@ impl DisplayableItem for AddAutoRenewedValidatorTx<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
         let base = self.base_tx.base_outputs_num_items()?;
         let signer = self.signer.num_items()?;
-        let validator_rewards = self.validator_rewards_owner.num_addresses() as u8;
-        let delegator_rewards = self.delegator_rewards_owner.num_addresses() as u8;
-        let owner_addresses = self.owner.num_addresses() as u8;
+        let validator_rewards = self.validator_rewards_owner.num_items()?;
+        let delegator_rewards = self.delegator_rewards_owner.num_items()?;
+        let owner_addresses = self.owner.num_items()?;
         let stake = self.num_stake_items()?;
 
         // 1(header) + base + 1(node_id) + signer + stake
@@ -313,23 +313,10 @@ impl<'b> AddAutoRenewedValidatorTx<'b> {
                 title[..header.len()].copy_from_slice(header);
                 res
             }
+            // addresses, then the threshold when there are several
             x @ 1.. if x < num_inner_items => {
-                let address_idx = x - 1;
-                let address = obj
-                    .output
-                    .get_address_at(address_idx as usize)
-                    .ok_or(ViewError::NoData)?;
-                let t = pic_str!(b"Address");
-                title[..t.len()].copy_from_slice(t);
-
                 let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
-                let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
-
-                let addr_len = address
-                    .encode_into(hrp, &mut encoded[..])
-                    .map_err(|_| ViewError::Unknown)?;
-
-                handle_ui_message(&encoded[..addr_len], message, page)
+                obj.render_item_with_hrp(hrp, x, title, message, page)
             }
             _ => obj.render_item(item_n, title, message, page),
         }
@@ -347,33 +334,29 @@ impl<'b> AddAutoRenewedValidatorTx<'b> {
 
     fn render_rewards_to(
         &self,
-        addr_idx: usize,
+        item_n: u8,
         title: &mut [u8],
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, zemu_sys::ViewError> {
         let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
-        let validators = self.validator_rewards_owner.num_addresses();
-        let delegators = self.delegator_rewards_owner.num_addresses();
-        let owners = self.owner.num_addresses();
+        let validators = self.validator_rewards_owner.num_items()?;
+        let delegators = self.delegator_rewards_owner.num_items()?;
+        let owners = self.owner.num_items()?;
 
         match_ranges! {
-            match addr_idx alias x {
+            match item_n alias x {
                 until validators => {
                     let label = pic_str!(b"Valida rewards to");
-                    title[..label.len()].copy_from_slice(label);
-                    self.validator_rewards_owner.render_address_with_hrp(hrp, x, message, page)
+                    self.validator_rewards_owner
+                        .render_item_with_label(hrp, label, x, title, message, page)
                 }
                 until delegators => {
                     let label = pic_str!(b"Delega rewards to");
-                    title[..label.len()].copy_from_slice(label);
-                    self.delegator_rewards_owner.render_address_with_hrp(hrp, x, message, page)
+                    self.delegator_rewards_owner
+                        .render_item_with_label(hrp, label, x, title, message, page)
                 }
-                until owners => {
-                    let label = pic_str!(b"Owner address");
-                    title[..label.len()].copy_from_slice(label);
-                    self.owner.render_address_with_hrp(hrp, x, message, page)
-                }
+                until owners => self.owner.render_item_with_hrp(hrp, x, title, message, page),
                 _ => Err(ViewError::NoData)
             }
         }
@@ -387,14 +370,17 @@ impl<'b> AddAutoRenewedValidatorTx<'b> {
         page: u8,
     ) -> Result<u8, zemu_sys::ViewError> {
         let mut buffer = [0; U64_FORMATTED_SIZE + 2];
-        let num_addresses = (self.validator_rewards_owner.num_addresses()
-            + self.delegator_rewards_owner.num_addresses()
-            + self.owner.num_addresses()) as u8;
+        let owner_items = checked_add!(
+            ViewError::Unknown,
+            self.validator_rewards_owner.num_items()?,
+            self.delegator_rewards_owner.num_items()?,
+            self.owner.num_items()?
+        )?;
 
         match_ranges! {
             match item_n alias x {
-                until num_addresses => {
-                    self.render_rewards_to(x as usize, title, message, page)
+                until owner_items => {
+                    self.render_rewards_to(x, title, message, page)
                 }
                 until 1 => {
                     let label = pic_str!(b"Delegate fee(%)");

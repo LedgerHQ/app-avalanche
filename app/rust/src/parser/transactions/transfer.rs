@@ -21,7 +21,7 @@ use crate::checked_add;
 use crate::handlers::handle_ui_message;
 use crate::parser::{
     nano_avax_to_fp_str, AvmOutput, BaseTxFields, DisplayableItem, FromBytes, Header, ParserError,
-    MAX_ADDRESS_ENCODED_LEN, TRANSFER_TX, U64_FORMATTED_SIZE,
+    TRANSFER_TX, U64_FORMATTED_SIZE,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -69,28 +69,10 @@ impl Transfer<'_> {
                 res
             }
 
+            // addresses, then the threshold when there are several
             x @ 1.. if x < num_inner_items => {
-                let addr_idx = x - 1;
-                // Transfer only supports secp_transfer outputs
-                // Unwrap is safe as we check outputs while parsing
-                let obj = obj.secp_transfer().unwrap();
-
-                let address = obj
-                    .get_address_at(addr_idx as usize)
-                    .ok_or(ViewError::NoData)?;
-
-                // render encoded address with proper hrp,
-                let t = pic_str!(b"Address");
-                title[..t.len()].copy_from_slice(t);
-
                 let hrp = self.header.hrp().map_err(|_| ViewError::Unknown)?;
-                let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
-
-                let addr_len = address
-                    .encode_into(hrp, &mut encoded[..])
-                    .map_err(|_| ViewError::Unknown)?;
-
-                handle_ui_message(&encoded[..addr_len], message, page)
+                obj.render_item_with_hrp(hrp, x, title, message, page)
             }
 
             _ => Err(ViewError::NoData),

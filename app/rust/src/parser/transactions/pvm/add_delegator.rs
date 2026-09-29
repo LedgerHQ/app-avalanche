@@ -25,7 +25,7 @@ use crate::{
     parser::{
         nano_avax_to_fp_str, BaseTxFields, DisplayableItem, FromBytes, Header, ObjectList,
         OutputIdx, ParserError, PvmOutput, SECPOutputOwners, Stake, TransferableOutput, Validator,
-        MAX_ADDRESS_ENCODED_LEN, PVM_ADD_DELEGATOR, U64_FORMATTED_SIZE,
+        PVM_ADD_DELEGATOR, U64_FORMATTED_SIZE,
     },
 };
 
@@ -302,27 +302,10 @@ impl<'b> AddDelegatorTx<'b> {
 
                 res
             }
-            // address rendering, according to avax team 99.99% of transactions only comes with one
-            // address, but we support rendering any
+            // addresses, then the threshold when there are several
             x @ 1.. if x < num_inner_items => {
-                // get the address index
-                let address_idx = x - 1;
-                let address = obj
-                    .output
-                    .get_address_at(address_idx as usize)
-                    .ok_or(ViewError::NoData)?;
-                // render encoded address with proper hrp,
-                let t = pic_str!(b"Address");
-                title[..t.len()].copy_from_slice(t);
-
                 let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
-                let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
-
-                let addr_len = address
-                    .encode_into(hrp, &mut encoded[..])
-                    .map_err(|_| ViewError::Unknown)?;
-
-                handle_ui_message(&encoded[..addr_len], message, page)
+                obj.render_item_with_hrp(hrp, x, title, message, page)
             }
             // by default we call the objects impl here,
             // if it is a locked output, that info will be shown otherwise,
@@ -341,25 +324,24 @@ impl<'b> AddDelegatorTx<'b> {
             .ok_or(ParserError::OperationOverflows)
     }
 
+    // the rewards owner's screens: its addresses, the locktime and the
+    // threshold where they apply
     fn render_rewards_to(
         &self,
-        addr_idx: usize,
+        item_n: u8,
         title: &mut [u8],
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, zemu_sys::ViewError> {
         let label = pic_str!(b"Rewards to");
-        title[..label.len()].copy_from_slice(label);
-
-        // render owner addresses
         let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
         self.rewards_owner
-            .render_address_with_hrp(hrp, addr_idx, message, page)
+            .render_item_with_label(hrp, label, item_n, title, message, page)
     }
 
     // rewards owner addresses and the fee
     fn num_last_items(&self) -> Result<u8, ViewError> {
-        let rewards_items = self.rewards_owner.addresses.len() as u8;
+        let rewards_items = self.rewards_owner.num_items()?;
         checked_add!(ViewError::Unknown, rewards_items, 1u8)
     }
 
@@ -372,13 +354,13 @@ impl<'b> AddDelegatorTx<'b> {
     ) -> Result<u8, zemu_sys::ViewError> {
 
         let mut buffer = [0; U64_FORMATTED_SIZE + 2];
-        let num_addresses = self.rewards_owner.addresses.len() as u8;
+        let rewards_items = self.rewards_owner.num_items()?;
 
         match_ranges! {
             match item_n alias x {
                 // render rewards
-                until num_addresses => {
-                    self.render_rewards_to(x as usize, title, message, page)
+                until rewards_items => {
+                    self.render_rewards_to(x, title, message, page)
                 }
                 until 1 => {
                     let label = pic_str!(b"Fee(AVAX)");

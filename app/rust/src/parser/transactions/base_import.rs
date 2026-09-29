@@ -25,7 +25,7 @@ use crate::{
     handlers::handle_ui_message,
     parser::{
         BaseTxFields, ChainId, DisplayableItem, FromBytes, Header, ObjectList, Output, ParserError,
-        TransferableInput, TransferableOutput, BLOCKCHAIN_ID_LEN, MAX_ADDRESS_ENCODED_LEN,
+        TransferableInput, TransferableOutput, BLOCKCHAIN_ID_LEN,
     },
 };
 
@@ -183,26 +183,10 @@ where
                 // render amount
                 obj.render_item(0, title, message, page)
             }
-            // address rendering, according to avax team 99.99% of transactions only comes with one
-            // address, but we support rendering any
+            // addresses, then the threshold when there are several
             x @ 1.. if x < num_inner_items => {
-                // get the address index
-                let address_idx = x - 1;
-                let address = obj
-                    .get_address_at(address_idx as usize)
-                    .ok_or(ViewError::NoData)?;
-                // render encoded address with proper hrp,
-                let t = pic_str!(b"Address");
-                title[..t.len()].copy_from_slice(t);
-
                 let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
-                let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
-
-                let addr_len = address
-                    .encode_into(hrp, &mut encoded[..])
-                    .map_err(|_| ViewError::Unknown)?;
-
-                handle_ui_message(&encoded[..addr_len], message, page)
+                obj.render_item_with_hrp(hrp, x, title, message, page)
             }
             _ => Err(ViewError::NoData),
         }

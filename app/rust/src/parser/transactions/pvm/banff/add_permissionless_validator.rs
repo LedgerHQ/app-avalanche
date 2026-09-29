@@ -25,7 +25,7 @@ use crate::{
         intstr_to_fpstr_inplace, nano_avax_to_fp_str, proof_of_possession::BLSSigner, u64_to_str,
         BaseTxFields, DisplayableItem, FromBytes, Header, ObjectList, OutputIdx, ParserError,
         PvmOutput, SECPOutputOwners, Stake, SubnetId, TransferableOutput, Validator,
-        DELEGATION_FEE_DIGITS, MAX_ADDRESS_ENCODED_LEN, PVM_ADD_PERMISSIONLESS_VALIDATOR, U64_FORMATTED_SIZE
+        DELEGATION_FEE_DIGITS, PVM_ADD_PERMISSIONLESS_VALIDATOR, U64_FORMATTED_SIZE
     },
 };
 
@@ -139,8 +139,8 @@ impl DisplayableItem for AddPermissionlessValidatorTx<'_> {
         let base = self.base_tx.base_outputs_num_items()?;
         let validator = self.validator.num_items()?;
         let signer = self.signer.num_items()?;
-        let validator_rewards = self.validator_rewards_owner.num_addresses() as u8;
-        let delegator_rewards = self.delegator_rewards_owner.num_addresses() as u8;
+        let validator_rewards = self.validator_rewards_owner.num_items()?;
+        let delegator_rewards = self.delegator_rewards_owner.num_items()?;
         let stake = self.num_stake_items()?;
 
         checked_add!(
@@ -360,27 +360,10 @@ impl<'b> AddPermissionlessValidatorTx<'b> {
 
                 res
             }
-            // address rendering, according to avax team 99.99% of transactions only comes with one
-            // address, but we support rendering any
+            // addresses, then the threshold when there are several
             x @ 1.. if x < num_inner_items => {
-                // get the address index
-                let address_idx = x - 1;
-                let address = obj
-                    .output
-                    .get_address_at(address_idx as usize)
-                    .ok_or(ViewError::NoData)?;
-                // render encoded address with proper hrp,
-                let t = pic_str!(b"Address");
-                title[..t.len()].copy_from_slice(t);
-
                 let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
-                let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
-
-                let addr_len = address
-                    .encode_into(hrp, &mut encoded[..])
-                    .map_err(|_| ViewError::Unknown)?;
-
-                handle_ui_message(&encoded[..addr_len], message, page)
+                obj.render_item_with_hrp(hrp, x, title, message, page)
             }
             // by default we call the objects impl here,
             // if it is a locked output, that info will be shown otherwise,
@@ -399,32 +382,32 @@ impl<'b> AddPermissionlessValidatorTx<'b> {
             .ok_or(ParserError::OperationOverflows)
     }
 
+    // the screens of both rewards owners: their addresses, and the
+    // locktime and threshold where they apply
     fn render_rewards_to(
         &self,
-        addr_idx: usize,
+        item_n: u8,
         title: &mut [u8],
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, zemu_sys::ViewError> {
         let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
-        let validators = self.validator_rewards_owner.num_addresses();
-        let delegators = self.delegator_rewards_owner.num_addresses();
+        let validators = self.validator_rewards_owner.num_items()?;
+        let delegators = self.delegator_rewards_owner.num_items()?;
 
         match_ranges! {
-            match addr_idx alias x {
+            match item_n alias x {
                 until validators => {
                     // Truncated due to NanoS 17 character limit
                     let label = pic_str!(b"Valida rewards to");
-                    title[..label.len()].copy_from_slice(label);
-
-                    self.validator_rewards_owner.render_address_with_hrp(hrp, x, message, page)
+                    self.validator_rewards_owner
+                        .render_item_with_label(hrp, label, x, title, message, page)
                 }
                 until delegators => {
                     // Truncated due to NanoS 17 character limit
                     let label = pic_str!(b"Delega rewards to");
-                    title[..label.len()].copy_from_slice(label);
-
-                    self.delegator_rewards_owner.render_address_with_hrp(hrp, x, message, page)
+                    self.delegator_rewards_owner
+                        .render_item_with_label(hrp, label, x, title, message, page)
                 }
                 _ => Err(ViewError::NoData)
             }
@@ -440,14 +423,17 @@ impl<'b> AddPermissionlessValidatorTx<'b> {
     ) -> Result<u8, zemu_sys::ViewError> {
 
         let mut buffer = [0; U64_FORMATTED_SIZE + 2];
-        let num_addresses = (self.validator_rewards_owner.num_addresses()
-            + self.delegator_rewards_owner.num_addresses()) as u8;
+        let rewards_items = checked_add!(
+            ViewError::Unknown,
+            self.validator_rewards_owner.num_items()?,
+            self.delegator_rewards_owner.num_items()?
+        )?;
 
         match item_n {
-            x if (0..num_addresses).contains(&x) => {
-                self.render_rewards_to(x as usize, title, message, page)
+            x if (0..rewards_items).contains(&x) => {
+                self.render_rewards_to(x, title, message, page)
             }
-            x if x == num_addresses => {
+            x if x == rewards_items => {
                 let label = pic_str!(b"Delegate fee(%)");
                 title[..label.len()].copy_from_slice(label);
                 u64_to_str(self.shares as _, &mut buffer[..]).map_err(|_| ViewError::Unknown)?;
@@ -457,7 +443,7 @@ impl<'b> AddPermissionlessValidatorTx<'b> {
 
                 handle_ui_message(buffer, message, page)
             }
-            x if x == num_addresses + 1 => {
+            x if x == rewards_items + 1 => {
                 let label = pic_str!(b"Fee(AVAX)");
                 title[..label.len()].copy_from_slice(label);
 

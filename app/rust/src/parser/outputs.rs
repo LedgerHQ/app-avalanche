@@ -31,6 +31,46 @@ pub use secp_mint_output::SECPMintOutput;
 pub use secp_output_owners::SECPOutputOwners;
 pub use secp_transfer_output::SECPTransferOutput;
 
+/// Whether an owner set needs a Threshold screen: with a single address the
+/// only valid threshold is 1, so the screen would say nothing.
+pub(crate) fn shows_threshold(num_addresses: usize) -> bool {
+    num_addresses > 1
+}
+
+/// Render the "Threshold" screen of an owner set as "<threshold> of <n>".
+///
+/// Without it a 1-of-2 output looks exactly like a 2-of-2 one, so any of the
+/// listed addresses, one of which may not be the user's, can spend it alone.
+pub(crate) fn render_threshold(
+    threshold: u32,
+    num_addresses: usize,
+    title: &mut [u8],
+    message: &mut [u8],
+    page: u8,
+) -> Result<u8, ViewError> {
+    use crate::parser::{u32_to_str, U32_FORMATTED_SIZE};
+    use bolos::{pic_str, PIC};
+
+    let label = pic_str!(b"Threshold");
+    title[..label.len()].copy_from_slice(label);
+
+    let of = pic_str!(b" of "!);
+    let mut buffer = [0; 2 * U32_FORMATTED_SIZE + 4];
+    let mut num = [0; U32_FORMATTED_SIZE];
+
+    let t = u32_to_str(threshold, &mut num[..]).map_err(|_| ViewError::Unknown)?;
+    let mut len = t.len();
+    buffer[..len].copy_from_slice(t);
+    buffer[len..len + of.len()].copy_from_slice(&of[..]);
+    len += of.len();
+
+    let n = u32_to_str(num_addresses as u32, &mut num[..]).map_err(|_| ViewError::Unknown)?;
+    buffer[len..len + n.len()].copy_from_slice(n);
+    len += n.len();
+
+    crate::handlers::handle_ui_message(&buffer[..len], message, page)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 #[cfg_attr(test, derive(Debug))]
@@ -71,6 +111,27 @@ where
 
     pub fn num_addresses(&self) -> usize {
         self.output().num_addresses()
+    }
+
+    /// Render one counted item of this output, encoding addresses for `hrp`.
+    ///
+    /// Items of an inner secp transfer output (addresses, threshold) go
+    /// through its hrp-aware renderer; anything the wrapper adds after them,
+    /// like the locked-funds line of a PvmOutput, through the wrapper's own.
+    pub fn render_item_with_hrp(
+        &self,
+        hrp: &str,
+        item_n: u8,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
+        match self.output().secp_transfer() {
+            Some(secp) if item_n < secp.num_items()? => {
+                secp.render_item_with_hrp(hrp, item_n, title, message, page)
+            }
+            _ => self.output.render_item(item_n, title, message, page),
+        }
     }
 
     // Any output whose address match any of the

@@ -1,6 +1,5 @@
 ---
 source: src/parser/transactions.rs
-assertion_line: 787
 expression: reduced
 input_file: src/parser/testvectors/x_create_asset.json
 ---
@@ -12,6 +11,7 @@ input_file: src/parser/testvectors/x_create_asset.json
     "Amount": "0.000012345 AVAX to ",
     "Address": "fuji12yp9cc0melq83a5nxnurf0nd6fk4t224unmnwx",
     "Address": "fuji1cv6yz28qvqfgah34yw3y53su39p6kzzehw5pj3",
+    "Threshold": "1 of 2",
     "Fee(AVAX)": "0.123444444",
     "Memo": "00010203",
 ]
