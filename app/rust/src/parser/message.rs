@@ -55,6 +55,23 @@ fn u8_to_hex_array(value: u8) -> [u8; 4] {
     result
 }
 
+/// Returns how `byte` is displayed and how many display characters that takes.
+///
+/// Only printable ASCII (0x20..=0x7E) is shown as is, and ASCII whitespace is
+/// shown as a space. Every other byte is escaped as `\xNN`, so a NUL can not
+/// end the displayed string early and control characters never reach the
+/// screen raw.
+#[inline(never)]
+fn display_repr(byte: u8) -> ([u8; HEX_REPR_LEN], usize) {
+    if byte.is_ascii_whitespace() {
+        ([b' ', 0, 0, 0], 1)
+    } else if (0x20..=0x7E).contains(&byte) {
+        ([byte, 0, 0, 0], 1)
+    } else {
+        (u8_to_hex_array(byte), HEX_REPR_LEN)
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(test, derive(Debug))]
 pub struct Message<'b> {
@@ -70,60 +87,63 @@ impl Message<'_> {
             .apdu_unwrap()
     }
 
+    /// Returns the number of bytes of `msg[start..]` that fit in one display
+    /// chunk.
+    ///
+    /// This is the single place that decides where a chunk ends: counting,
+    /// skipping to a chunk and rendering one all go through it, so they agree
+    /// on every boundary. A byte whose display form does not fit in what is
+    /// left of the chunk starts the next chunk instead of being dropped.
+    fn chunk_span(msg: &[u8], start: usize) -> usize {
+        let mut consumed = 0;
+        let mut display_len = 0;
+
+        for &byte in msg.iter().skip(start) {
+            let (_, len) = display_repr(byte);
+            if display_len + len > MSG_MAX_CHUNK_LEN {
+                break;
+            }
+            display_len += len;
+            consumed += 1;
+        }
+
+        consumed
+    }
+
     fn get_chunk(&self, chunk_idx: usize, chunk: &mut [u8]) -> usize {
         if chunk.len() < MSG_MAX_CHUNK_LEN {
             return 0;
         }
         let msg = self.msg();
-        let mut chunk_len = 0;
 
-        // Calculate starting point for reading
-        let mut cumulative_chunk_len = 0;
-        let mut start_byte = 0;
-
+        // Skip the chunks before the requested one, using the same boundaries
+        // `calculate_chunk_count` used to count them.
+        let mut start = 0;
         for _ in 0..chunk_idx {
-            while cumulative_chunk_len < MSG_MAX_CHUNK_LEN && start_byte < msg.len() {
-                let byte = msg[start_byte];
-                cumulative_chunk_len += if byte.is_ascii() { 1 } else { HEX_REPR_LEN };
-                start_byte += 1;
+            let consumed = Self::chunk_span(msg, start);
+            if consumed == 0 {
+                return 0;
             }
-            cumulative_chunk_len = 0;
+            start += consumed;
         }
 
         // We must do the same as app-ethereum where, It has an auxiliary buffer where
         // data to be rendered is copied, this data is "modified" from the original
         // as follows:
         // 1. process the message character per character
-        // 2. Printable ascii characters are displayed as it is.
-        // 3. Whitespace characters are displayed as they are
-        // 4. non printable ascii characters are displayed as hex codes: \x00
-        // for example for the null character
+        // 2. Printable ascii characters (0x20..=0x7E) are displayed as they are.
+        // 3. Whitespace characters are displayed as a space
+        // 4. every other byte, including NUL and the other control characters,
+        // is displayed as a hex code: \x00 for example for the null character
         //
         // so we are going to do this for every current chunk of data
         // and for either eth PersonalMessage eip-191 or avax personal messages
-        for &byte in msg.iter().skip(start_byte) {
-            let bytes_to_add = if byte.is_ascii_whitespace() {
-                chunk[chunk_len] = b' ';
-                1
-            } else if byte.is_ascii() {
-                chunk[chunk_len] = byte;
-                1
-            } else {
-                // check if current chunk has space for this hex character
-                // which requires 4-bytes
-                let hex = u8_to_hex_array(byte);
-                if chunk_len + HEX_REPR_LEN > MSG_MAX_CHUNK_LEN {
-                    break;
-                }
-                chunk[chunk_len..chunk_len + HEX_REPR_LEN].copy_from_slice(&hex);
-                HEX_REPR_LEN
-            };
-
-            chunk_len += bytes_to_add;
-
-            if chunk_len >= MSG_MAX_CHUNK_LEN {
-                break;
-            }
+        let consumed = Self::chunk_span(msg, start);
+        let mut chunk_len = 0;
+        for &byte in &msg[start..start + consumed] {
+            let (repr, len) = display_repr(byte);
+            chunk[chunk_len..chunk_len + len].copy_from_slice(&repr[..len]);
+            chunk_len += len;
         }
 
         chunk_len
@@ -141,11 +161,18 @@ impl Message<'_> {
     }
 
     fn calculate_chunk_count(msg: &[u8]) -> Result<u8, ParserError> {
-        let mut total_len = 0usize;
-        for &byte in msg {
-            total_len += if byte.is_ascii() { 1 } else { HEX_REPR_LEN };
+        let mut chunks = 0usize;
+        let mut start = 0;
+        while start < msg.len() {
+            let consumed = Self::chunk_span(msg, start);
+            // every byte's display form fits in an empty chunk, so this only
+            // guards against looping forever
+            if consumed == 0 {
+                return Err(ParserError::InvalidMessageSize);
+            }
+            start += consumed;
+            chunks += 1;
         }
-        let chunks = total_len.div_ceil(MSG_MAX_CHUNK_LEN);
         u8::try_from(chunks).map_err(|_| ParserError::InvalidMessageSize)
     }
 }
@@ -504,5 +531,96 @@ mod tests_message_render {
         let at_limit = create_message(&vec![b'A'; 255 * MSG_MAX_CHUNK_LEN]);
         let msg = Message::from_bytes(at_limit.as_slice()).unwrap().1;
         assert_eq!(msg.chunk_count, 255);
+    }
+
+    fn render_all_chunks(msg: &Message) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut chunk = [0u8; MSG_MAX_CHUNK_LEN];
+        for i in 0..msg.num_items().unwrap() {
+            let len = msg.get_chunk(i as usize, &mut chunk);
+            assert!(len > 0, "chunk {i} is empty");
+            assert!(len <= MSG_MAX_CHUNK_LEN);
+            out.extend_from_slice(&chunk[..len]);
+        }
+        out
+    }
+
+    fn escaped(content: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for &b in content {
+            if b.is_ascii_whitespace() {
+                out.push(b' ');
+            } else if (0x20..=0x7E).contains(&b) {
+                out.push(b);
+            } else {
+                out.extend_from_slice(std::format!("\\x{b:02x}").as_bytes());
+            }
+        }
+        out
+    }
+
+    // A NUL used to be copied raw, ending the C string the device displays:
+    // everything after it was signed but never shown.
+    #[test]
+    fn nul_and_control_bytes_are_escaped() {
+        let content = b"Pay 1 AVAX\x00 and 1000 AVAX\x1b[2K\x07\x7f";
+        let data = create_message(content);
+        let msg = Message::from_bytes(data.as_slice()).unwrap().1;
+
+        let shown = render_all_chunks(&msg);
+        assert_eq!(
+            shown.as_slice(),
+            b"Pay 1 AVAX\\x00 and 1000 AVAX\\x1b[2K\\x07\\x7f".as_slice()
+        );
+        assert!(!shown.contains(&0));
+        assert!(shown.iter().all(|b| (0x20..=0x7E).contains(b)));
+    }
+
+    // An escape that did not fit at the end of a chunk was dropped: the
+    // render loop stopped before it, and the skip loop for the next chunk
+    // counted it as consumed.
+    #[test]
+    fn escape_straddling_chunk_boundary_is_shown() {
+        let mut content = vec![b'A'; MSG_MAX_CHUNK_LEN - 1];
+        content.push(0x80);
+        content.extend_from_slice(b"tail");
+        let data = create_message(&content);
+        let msg = Message::from_bytes(data.as_slice()).unwrap().1;
+
+        assert_eq!(msg.num_items().unwrap(), 2);
+
+        let mut chunk = [0u8; MSG_MAX_CHUNK_LEN];
+        let len = msg.get_chunk(0, &mut chunk);
+        assert_eq!(&chunk[..len], &content[..MSG_MAX_CHUNK_LEN - 1]);
+
+        let len = msg.get_chunk(1, &mut chunk);
+        assert_eq!(&chunk[..len], b"\\x80tail");
+    }
+
+    // Counting, skipping and rendering agree on every boundary: the chunks
+    // put together are exactly the escaped message, for escapes landing at
+    // every offset around the chunk edge.
+    #[test]
+    fn chunks_concatenate_to_whole_escaped_message() {
+        for prefix in 90..=MSG_MAX_CHUNK_LEN + 5 {
+            let mut content = vec![b'x'; prefix];
+            content.extend_from_slice(&[0x00, 0xff, b'y', 0x01, b'\n', 0x9b]);
+            content.extend_from_slice(&[0x80; 60]);
+            content.extend_from_slice(b"end");
+            let data = create_message(&content);
+            let msg = Message::from_bytes(data.as_slice()).unwrap().1;
+
+            assert_eq!(
+                render_all_chunks(&msg),
+                escaped(&content),
+                "prefix {prefix}"
+            );
+            // one chunk past the end renders nothing
+            let mut chunk = [0u8; MSG_MAX_CHUNK_LEN];
+            assert_eq!(
+                msg.get_chunk(msg.num_items().unwrap() as usize, &mut chunk),
+                0
+            );
+        }
     }
 }
