@@ -301,7 +301,7 @@ impl<'b> ERC20<'b> {
                 to,
                 value,
             } => (contract_address, to, value),
-            _ => unsafe { core::hint::unreachable_unchecked() },
+            _ => return Err(ViewError::Unknown),
         };
 
         match item_n {
@@ -336,7 +336,7 @@ impl<'b> ERC20<'b> {
                 to,
                 value,
             } => (contract_address, from, to, value),
-            _ => unsafe { core::hint::unreachable_unchecked() },
+            _ => return Err(ViewError::Unknown),
         };
 
         match item_n {
@@ -377,7 +377,7 @@ impl<'b> ERC20<'b> {
                 spender,
                 value,
             } => (contract_address, spender, value),
-            _ => unsafe { core::hint::unreachable_unchecked() },
+            _ => return Err(ViewError::Unknown),
         };
 
         match item_n {

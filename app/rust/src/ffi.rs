@@ -317,16 +317,20 @@ pub unsafe extern "C" fn _getItem(
     page_idx: u8,
     page_count: *mut u8,
 ) -> u32 {
+    if ctx.is_null() {
+        return ParserError::ParserContextMismatch as _;
+    }
+
+    if out_key.is_null() || out_value.is_null() || page_count.is_null() {
+        return ParserError::NoData as _;
+    }
+
     *page_count = 0u8;
 
     let page_count = &mut *page_count;
 
     let key = core::slice::from_raw_parts_mut(out_key as *mut u8, key_len as usize);
     let value = core::slice::from_raw_parts_mut(out_value as *mut u8, out_len as usize);
-
-    if ctx.is_null() {
-        return ParserError::ParserContextMismatch as _;
-    }
 
     let Ok(tx_type) = Instruction::try_from((*ctx).ins) else {
         return ParserError::InvalidTransactionType as u32;
@@ -762,6 +766,56 @@ mod tests {
             )
         };
         assert_eq!(err, ParserError::UnexpectedError as u32);
+    }
+
+    #[test]
+    fn get_item_checks_out_pointers() {
+        use core::ptr::{null, null_mut};
+
+        let data = avax_msg_data();
+        let mut state = StateBuffer([0; STATE_SIZE]);
+        let mut guarded = GuardedCtx::new(
+            Instruction::SignAvaxMsg,
+            &data,
+            &mut state,
+            size_of::<AvaxMessage>(),
+        );
+        let ctx: *mut parser_context_t = &mut guarded.ctx;
+        assert_eq!(unsafe { _parser_read(ctx) }, ParserError::ParserOk as u32);
+
+        let mut key = [0i8; 40];
+        let mut value = [0i8; 40];
+        let mut page_count = 0u8;
+
+        let get_item = |ctx: *const _, key: *mut i8, value: *mut i8, page_count: *mut u8| unsafe {
+            _getItem(ctx, 0, key, 40, value, 40, 0, page_count)
+        };
+
+        assert_eq!(
+            get_item(
+                null(),
+                key.as_mut_ptr(),
+                value.as_mut_ptr(),
+                &mut page_count
+            ),
+            ParserError::ParserContextMismatch as u32
+        );
+        assert_eq!(
+            get_item(ctx, null_mut(), value.as_mut_ptr(), &mut page_count),
+            ParserError::NoData as u32
+        );
+        assert_eq!(
+            get_item(ctx, key.as_mut_ptr(), null_mut(), &mut page_count),
+            ParserError::NoData as u32
+        );
+        assert_eq!(
+            get_item(ctx, key.as_mut_ptr(), value.as_mut_ptr(), null_mut()),
+            ParserError::NoData as u32
+        );
+        assert_eq!(
+            get_item(ctx, key.as_mut_ptr(), value.as_mut_ptr(), &mut page_count),
+            ParserError::ParserOk as u32
+        );
     }
 
     #[test]

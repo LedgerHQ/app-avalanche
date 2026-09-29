@@ -239,7 +239,7 @@ impl BaseLegacy<'_> {
     ) -> Result<u8, ViewError> {
         let erc20 = match self.data {
             EthData::Erc20(erc20) => erc20,
-            _ => unsafe { core::hint::unreachable_unchecked() },
+            _ => return Err(ViewError::Unknown),
         };
 
         let erc_num_items = erc20.num_items()?;
@@ -277,7 +277,7 @@ impl BaseLegacy<'_> {
     ) -> Result<u8, ViewError> {
         let erc721 = match self.data {
             EthData::Erc721(erc721) => erc721,
-            _ => unsafe { core::hint::unreachable_unchecked() },
+            _ => return Err(ViewError::Unknown),
         };
 
         let erc_num_items = erc721.num_items()?;
