@@ -301,9 +301,7 @@ unsafe fn num_items_avax(ctx: *const parser_context_t, num_items: &mut u8) -> u3
             ParserError::ParserOk as u32
         }
         _ => ParserError::InvalidTransactionType as u32,
-    };
-
-    ParserError::ParserOk as u32
+    }
 }
 
 #[no_mangle]
@@ -516,6 +514,37 @@ mod tests {
         // no change paths, then the transaction
         let mut data = std::vec![0u8];
         data.extend(hex::decode(TRANSFER_TX).unwrap());
+        data
+    }
+
+    /// `TRANSFER_TX` with its two outputs replaced by one output per entry of
+    /// `addresses`, each with that many addresses.
+    fn transfer_with_outputs(addresses: &[u32]) -> Vec<u8> {
+        let tx = hex::decode(TRANSFER_TX).unwrap();
+        // codec, type, network id and blockchain id; then the output count
+        let (header, rest) = tx.split_at(42);
+        let asset = &rest[4..36];
+        // the two original outputs are 80 bytes each
+        let inputs_and_memo = &rest[4 + 2 * 80..];
+
+        let mut data = std::vec![0u8]; // no change paths
+        data.extend_from_slice(header);
+        data.extend((addresses.len() as u32).to_be_bytes());
+        for (i, n) in addresses.iter().enumerate() {
+            data.extend_from_slice(asset);
+            data.extend(7u32.to_be_bytes()); // secp256k1 transfer output
+            data.extend(1u64.to_be_bytes()); // amount
+            data.extend(0u64.to_be_bytes()); // locktime
+            data.extend(1u32.to_be_bytes()); // threshold
+            data.extend(n.to_be_bytes());
+            for a in 0..*n {
+                let mut address = [0x11u8; 20];
+                address[0] = i as u8;
+                address[1] = a as u8;
+                data.extend_from_slice(&address);
+            }
+        }
+        data.extend_from_slice(inputs_and_memo);
         data
     }
 
@@ -843,6 +872,38 @@ mod tests {
         guarded.ctx.tx_obj.state = core::ptr::null_mut();
         assert_eq!(
             unsafe { _parser_read(&guarded.ctx) },
+            ParserError::NoData as u32
+        );
+    }
+
+    #[test]
+    #[cfg_attr(not(miri), file_serial(path))]
+    fn num_items_reports_errors() {
+        set_avax_root_path();
+        // 64 outputs of 3 addresses need more than 255 items
+        let data = transfer_with_outputs(&[3; 64]);
+        let mut state = StateBuffer([0; STATE_SIZE]);
+        let mut guarded = GuardedCtx::new(
+            Instruction::SignAvaxTx,
+            &data,
+            &mut state,
+            size_of::<Transaction>(),
+        );
+        assert_eq!(
+            unsafe { _parser_read(&guarded.ctx) },
+            ParserError::ParserOk as u32
+        );
+
+        let mut num_items = 0u8;
+        assert_ne!(
+            unsafe { _getNumItems(&guarded.ctx, &mut num_items) },
+            ParserError::ParserOk as u32
+        );
+
+        // and one that was never parsed
+        guarded.ctx.tx_obj.state = core::ptr::null_mut();
+        assert_eq!(
+            unsafe { _getNumItems(&guarded.ctx, &mut num_items) },
             ParserError::NoData as u32
         );
     }

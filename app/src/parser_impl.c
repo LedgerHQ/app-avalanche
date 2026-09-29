@@ -94,8 +94,18 @@ const char *parser_getErrorDescription(parser_error_t err) {
             return "Invalid contract address specified";
         case parser_context_unexpected_size:
             return "Unexpected context size";
+        case parser_too_many_addresses:
+            return "Too many addresses";
+        case parser_invalid_message_size:
+            return "Invalid message size";
+        case parser_invalid_codec_id:
+            return "Invalid codec ID";
+        case parser_invalid_length:
+            return "Invalid length";
         case parser_blind_sign_not_enabled:
             return "Blind signing not enabled";
+        case parser_invalid_source_address_size:
+            return "Invalid source address size";
         default:
             return "Unrecognized error code\n";
     }
