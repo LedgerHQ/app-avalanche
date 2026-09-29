@@ -32,6 +32,7 @@ import {
   TRANSFORM_SUBNET,
   REMOVE_SUBNET_VALIDATOR,
   CONVERT_SUBNET_TO_L1_VALIDATOR,
+  CONVERT_SUBNET_TO_L1_WITH_VALIDATORS,
   REGISTER_L1_VALIDATOR,
   DISABLE_L1_VALIDATOR,
   SET_L1_VALIDATOR_WEIGHT,
@@ -109,6 +110,10 @@ const FULL_SIGN_TEST_DATA = [
   {
     name: 'convert_subnet_to_l1_validator',
     op: CONVERT_SUBNET_TO_L1_VALIDATOR,
+  },
+  {
+    name: 'convert_subnet_to_l1_with_validators',
+    op: CONVERT_SUBNET_TO_L1_WITH_VALIDATORS,
   },
   {
     name: 'register_l1_validator',
