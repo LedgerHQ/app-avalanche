@@ -30,8 +30,8 @@ use crate::{
     dispatcher::ApduHandler,
     handlers::resources::{
         StreamingAccessors, BUFFER, EXPECTED_BYTES, IS_LEGACY_TX, LAST_PACKET, PATH,
-        RECEIVED_BYTES, SECOND_LAST_PACKET, STREAMING_CHAIN_ID, STREAMING_HASH, STREAMING_HASHER,
-        STREAMING_MODE, STREAMING_MODE_USED, STREAMING_TX_TYPE,
+        RECEIVED_BYTES, SECOND_LAST_PACKET, STREAMING_CHAIN_ID, STREAMING_HASHER, STREAMING_MODE,
+        STREAMING_TX_TYPE,
     },
     parser::{
         bytes_to_u64, is_avax_chain_bytes, DisplayableItem, EthTransaction, FromBytes, U32_SIZE,
@@ -226,6 +226,7 @@ impl Sign {
             is_typed: tx.is_typed_tx(),
             chain_id: chain_id_to_array(tx.chain_id()),
             tx,
+            blind: false,
         };
 
         crate::show_ui!(unsafe { ui.show(flags) })
@@ -269,6 +270,7 @@ impl Sign {
             is_typed: tx.is_typed_tx(),
             chain_id: chain_id_to_array(tx.chain_id()),
             tx,
+            blind: false,
         });
 
         unsafe {
@@ -290,12 +292,6 @@ impl Sign {
         let hash = hasher
             .finalize()
             .map_err(|_| ParserError::UnexpectedError)?;
-
-        // Mark that streaming mode was used for this transaction and store the hash
-        unsafe {
-            *crate::lock_mut!(STREAMING_MODE_USED).lock(StreamingAccessors::EthSign) = true;
-            *crate::lock_mut!(STREAMING_HASH).lock(StreamingAccessors::EthSign) = Some(hash);
-        }
 
         // Create a minimal SignUI with the pre-computed hash for blind signing
         // We need a dummy transaction object but it won't be displayed in blind signing mode
@@ -369,6 +365,7 @@ impl Sign {
             is_typed, // Transaction type from first packet
             chain_id, // Chain ID from first packet (for correct V calculation)
             tx,       // Dummy transaction (won't be displayed in blind signing)
+            blind: true,
         });
 
         // Store the UI for later signing
@@ -720,6 +717,8 @@ pub(crate) struct SignUI {
     pub(crate) tx: EthTransaction<'static>,
     pub(crate) is_typed: bool, // For correct V calculation in blind signing
     pub(crate) chain_id: Option<[u8; 8]>, // Store raw chain ID bytes for V calculation (fixed array)
+    // Streamed transaction: reviewed as its hash, with the blind-signing UI
+    pub(crate) blind: bool,
 }
 
 impl Viewable for SignUI {
@@ -739,6 +738,24 @@ impl Viewable for SignUI {
     }
 
     fn accept(&mut self, out: &mut [u8]) -> (usize, u16) {
+        let res = self.sign_tx(out);
+
+        // The review is over whatever the outcome: reset the globals on every
+        // exit, so a failed signature leaves no session behind for the next
+        // request
+        let _ = cleanup_globals();
+
+        res
+    }
+
+    fn reject(&mut self, _: &mut [u8]) -> (usize, u16) {
+        let _ = cleanup_globals();
+        (0, Error::CommandNotAllowed as _)
+    }
+}
+
+impl SignUI {
+    fn sign_tx(&self, out: &mut [u8]) -> (usize, u16) {
         let path = match Sign::get_derivation_info() {
             Err(e) => return (0, e as _),
             Ok(k) => k,
@@ -748,11 +765,6 @@ impl Viewable for SignUI {
             Err(e) => return (0, e as _),
             Ok(k) => k,
         };
-
-        //reset globals to avoid skipping `Init`
-        if let Err(e) = cleanup_globals() {
-            return (0, e as _);
-        }
 
         let mut tx = 0;
 
@@ -845,11 +857,6 @@ impl Viewable for SignUI {
 
         (tx, Error::Success as _)
     }
-
-    fn reject(&mut self, _: &mut [u8]) -> (usize, u16) {
-        let _ = cleanup_globals();
-        (0, Error::CommandNotAllowed as _)
-    }
 }
 
 pub fn cleanup_globals() -> Result<(), Error> {
@@ -868,12 +875,8 @@ pub fn cleanup_globals() -> Result<(), Error> {
             let _ = crate::lock_mut!(BUFFER).release(Sign);
         }
 
-        // Reset streaming mode used flag, hash, and metadata
-        use crate::handlers::resources::{
-            STREAMING_CHAIN_ID, STREAMING_HASH, STREAMING_MODE_USED, STREAMING_TX_TYPE,
-        };
-        *crate::lock_mut!(STREAMING_MODE_USED).lock(StreamingAccessors::EthSign) = false;
-        *crate::lock_mut!(STREAMING_HASH).lock(StreamingAccessors::EthSign) = None;
+        // Reset streaming metadata
+        use crate::handlers::resources::{STREAMING_CHAIN_ID, STREAMING_TX_TYPE};
         *crate::lock_mut!(STREAMING_TX_TYPE).lock(StreamingAccessors::EthSign) = false;
         *crate::lock_mut!(STREAMING_CHAIN_ID).lock(StreamingAccessors::EthSign) = None;
 
@@ -893,27 +896,34 @@ pub fn cleanup_globals() -> Result<(), Error> {
     Ok(())
 }
 
+/// The streamed transaction under review, if the current ETH review is one.
+///
+/// Both the choice of the blind-signing UI and the hash it shows come from
+/// the review the current request stored, the same object `accept` signs,
+/// so they cannot disagree with it or outlive it.
+unsafe fn blind_review() -> Option<&'static SignUI> {
+    match crate::lock_mut!(ETH_UI).lock(EthAccessors::Tx) {
+        Some(EthUi::Tx(ui)) if ui.blind => Some(ui),
+        _ => None,
+    }
+}
+
 /// Check if streaming mode was used for the last ETH transaction
 #[no_mangle]
 pub unsafe extern "C" fn rs_eth_was_streaming_mode_used() -> bool {
-    use crate::handlers::resources::STREAMING_MODE_USED;
-
-    *crate::lock_mut!(STREAMING_MODE_USED).lock(StreamingAccessors::EthSign)
+    blind_review().is_some()
 }
 
 /// Get the computed hash from streaming mode (returns true if hash is available)
 #[no_mangle]
 pub unsafe extern "C" fn rs_eth_get_streaming_hash(hash_buffer: *mut u8, buffer_len: u16) -> bool {
-    use crate::handlers::resources::STREAMING_HASH;
-
     if buffer_len < 32 {
         return false;
     }
 
-    let hash_option = *crate::lock_mut!(STREAMING_HASH).lock(StreamingAccessors::EthSign);
-    if let Some(hash) = hash_option {
+    if let Some(ui) = blind_review() {
         let buffer_slice = std::slice::from_raw_parts_mut(hash_buffer, 32);
-        buffer_slice.copy_from_slice(&hash);
+        buffer_slice.copy_from_slice(&ui.hash);
         true
     } else {
         false
@@ -1061,5 +1071,164 @@ mod tests {
             let value = bytes_to_u64(recovered).expect("fits in u64");
             assert_eq!(value, expected, "round trip failed for chain id {expected}");
         }
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    use crate::handlers::resources::PATHAccessors;
+    use crate::parser::rlp_test_utils::{item, list, uint};
+    use crate::parser::{AVAX_C_CHAIN_MAINNET_ID, EIP1559_TX};
+    use serial_test::file_serial;
+    use std::vec::Vec;
+
+    const ETH_PATH: [u32; 5] = [0x8000_002c, 0x8000_003c, 0x8000_0000, 0, 0];
+
+    fn apdu(p1: u8, payload: &[u8]) -> Result<bool, ParserError> {
+        let mut buf = std::vec![0u8; 5 + payload.len()];
+        buf[..5].copy_from_slice(&[0xE0, 0x04, p1, 0x00, payload.len() as u8]);
+        buf[5..].copy_from_slice(payload);
+        let rx = buf.len() as u32;
+        Sign::parse(ApduBufferRead::new(&mut buf, rx).unwrap())
+    }
+
+    fn init_payload(chunk: &[u8]) -> Vec<u8> {
+        let mut out = std::vec![ETH_PATH.len() as u8];
+        for c in ETH_PATH {
+            out.extend_from_slice(&c.to_be_bytes());
+        }
+        out.extend_from_slice(chunk);
+        out
+    }
+
+    /// Send the INIT packet of `tx` (path + as many bytes as fit)
+    /// and return the rest
+    fn send_init(tx: &[u8]) -> (Result<bool, ParserError>, &[u8]) {
+        let room = 255 - init_payload(&[]).len();
+        let (head, rest) = tx.split_at(core::cmp::min(room, tx.len()));
+        (apdu(0x00, &init_payload(head)), rest)
+    }
+
+    /// Send `tx` the way hw-app-eth does: INIT then 0x80 chunks
+    fn send_tx(tx: &[u8]) -> Result<bool, ParserError> {
+        let (res, mut rest) = send_init(tx);
+        let mut done = res?;
+        while !rest.is_empty() {
+            let (chunk, r) = rest.split_at(core::cmp::min(255, rest.len()));
+            done = apdu(0x80, chunk)?;
+            rest = r;
+        }
+        Ok(done)
+    }
+
+    fn eip1559(chain_id: u64, data_len: usize) -> Vec<u8> {
+        let mut tx = std::vec![EIP1559_TX];
+        tx.extend(list(&[
+            uint(chain_id as u128),
+            uint(1),
+            uint(1_000_000_000),
+            uint(30_000_000_000),
+            uint(100_000),
+            item(&[0xa1; 20]),
+            uint(0),
+            item(&std::vec![0x5a; data_len]),
+            list(&[]),
+        ]));
+        tx
+    }
+
+    fn keccak(data: &[u8]) -> [u8; 32] {
+        Sign::digest(data).unwrap()
+    }
+
+    fn ui_hash() -> [u8; 32] {
+        match unsafe { crate::lock_mut!(ETH_UI).lock(EthAccessors::Tx) } {
+            Some(EthUi::Tx(ui)) => ui.hash,
+            _ => panic!("no tx review stored"),
+        }
+    }
+
+    fn blind_hash_shown() -> Option<[u8; 32]> {
+        let mut hash = [0; 32];
+        unsafe { rs_eth_get_streaming_hash(hash.as_mut_ptr(), 32) }.then_some(hash)
+    }
+
+    fn accept() -> u16 {
+        let mut out = [0; 100];
+        let ui = unsafe { crate::lock_mut!(ETH_UI).lock(EthAccessors::Tx) };
+        ui.as_mut().expect("no review stored").accept(&mut out).1
+    }
+
+    fn reset() {
+        let _ = cleanup_globals();
+        unsafe {
+            crate::lock_mut!(ETH_UI).lock(EthAccessors::Tx).take();
+        }
+    }
+
+    // AVAX-05: an ETH accept that fails before cleanup must not leave the
+    // blind-signing review of that stream behind for the next transaction.
+    #[test]
+    #[file_serial(path)]
+    fn failed_accept_does_not_leak_blind_review() {
+        reset();
+
+        let big = eip1559(AVAX_C_CHAIN_MAINNET_ID, Sign::BUFFER_CAPACITY + 100);
+        assert_eq!(send_tx(&big), Ok(true));
+        assert!(unsafe { rs_eth_was_streaming_mode_used() });
+        assert_eq!(blind_hash_shown(), Some(keccak(&big)));
+
+        // another handler takes the path between chunks (e.g. 80 05)
+        unsafe {
+            crate::lock_mut!(PATH).lock(PATHAccessors::Sign);
+        }
+        assert_ne!(accept(), Error::Success as u16);
+
+        // the host "retries" with a small transaction
+        let small = eip1559(AVAX_C_CHAIN_MAINNET_ID, 10);
+        assert_eq!(send_tx(&small), Ok(true));
+
+        assert!(
+            !unsafe { rs_eth_was_streaming_mode_used() },
+            "small tx reviewed with the blind-sign UI"
+        );
+        assert_ne!(blind_hash_shown(), Some(keccak(&big)), "stale hash shown");
+        assert_eq!(ui_hash(), keccak(&small));
+        reset();
+    }
+
+    // Once answered, a review is dropped: nothing may be signed from it again.
+    #[test]
+    #[file_serial(path)]
+    fn review_is_dropped_once_answered() {
+        let stored = || unsafe { crate::lock_mut!(ETH_UI).lock(EthAccessors::Tx).is_some() };
+
+        // accepted
+        reset();
+        assert_eq!(send_tx(&eip1559(AVAX_C_CHAIN_MAINNET_ID, 10)), Ok(true));
+        let (mut tx, mut out) = (0u16, [0u8; 100]);
+        let code = unsafe {
+            crate::ffi::eth_tx::_accept_eth_tx(&mut tx, out.as_mut_ptr(), out.len() as u32)
+        };
+        assert_eq!(code, Error::Success as u16);
+        assert!(!stored());
+
+        // accept failed
+        assert_eq!(send_tx(&eip1559(AVAX_C_CHAIN_MAINNET_ID, 10)), Ok(true));
+        unsafe {
+            crate::lock_mut!(PATH).lock(PATHAccessors::Sign);
+        }
+        let code = unsafe {
+            crate::ffi::eth_tx::_accept_eth_tx(&mut tx, out.as_mut_ptr(), out.len() as u32)
+        };
+        assert_ne!(code, Error::Success as u16);
+        assert!(!stored());
+
+        // rejected
+        assert_eq!(send_tx(&eip1559(AVAX_C_CHAIN_MAINNET_ID, 10)), Ok(true));
+        unsafe { crate::ffi::sign_hash::_clean_up_eth() };
+        assert!(!stored());
+        reset();
     }
 }

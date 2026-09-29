@@ -68,7 +68,11 @@ pub unsafe fn get_eth_item(
 }
 
 #[no_mangle]
-unsafe extern "C" fn _accept_eth_tx(tx: *mut u16, buffer: *mut u8, buffer_len: u32) -> u16 {
+pub(crate) unsafe extern "C" fn _accept_eth_tx(
+    tx: *mut u16,
+    buffer: *mut u8,
+    buffer_len: u32,
+) -> u16 {
     if tx.is_null() || buffer.is_null() || buffer_len == 0 {
         return ApduError::DataInvalid as u16;
     }
@@ -76,12 +80,18 @@ unsafe extern "C" fn _accept_eth_tx(tx: *mut u16, buffer: *mut u8, buffer_len: u
     let data = std::slice::from_raw_parts_mut(buffer, buffer_len as usize);
 
     let ui_lock = crate::lock_mut!(ETH_UI).lock(EthAccessors::Tx);
-    if let Some(obj) = ui_lock {
+    let code = if let Some(obj) = ui_lock.as_mut() {
         let (_tx, code) = obj.accept(data);
         *tx = _tx as u16;
         code
     } else {
         // No ethereum transaction has been processed yet
         ApduError::DataInvalid as u16
-    }
+    };
+
+    // The review is over, whatever the outcome: nothing may be signed from
+    // it again
+    ui_lock.take();
+
+    code
 }

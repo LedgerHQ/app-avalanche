@@ -25,7 +25,7 @@ use crate::ZxError;
 use zemu_sys::{ViewError, Viewable};
 
 pub mod context;
-mod eth_tx;
+pub(crate) mod eth_tx;
 pub mod ext_public_key;
 pub mod nft_info;
 pub mod public_key;

@@ -90,6 +90,9 @@ pub use warp_message::*;
 #[cfg(feature = "erc721")]
 pub use coreth::{data::ERC721Info, nft_info::NftInfo};
 
+#[cfg(test)]
+pub(crate) use coreth::native::rlp_test_utils;
+
 ///This trait defines the interface useful in the UI context
 /// so that all the different OperationTypes or other items can handle their own UI
 pub trait DisplayableItem {

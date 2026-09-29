@@ -72,13 +72,18 @@ pub unsafe extern "C" fn _clean_up_hash() {
 ///
 /// The Rust `reject` for the ETH flow already does this, but nothing on the C
 /// side calls it: a refused review goes through `app_reject`, which returns to
-/// the host without telling the Rust handler. That left STREAMING_MODE_USED and
-/// STREAMING_HASH set, so the next ETH review rendered the previous hash while
-/// signing the new transaction -- the same shape as the sign-hash leak, on the
-/// other handler.
+/// the host without telling the Rust handler. That left the streaming state
+/// set, so the next ETH review rendered the previous hash while signing the
+/// new transaction -- the same shape as the sign-hash leak, on the other
+/// handler.
 #[no_mangle]
 pub unsafe extern "C" fn _clean_up_eth() {
     _ = crate::handlers::eth::signing::cleanup_globals();
+
+    // and the refused review itself
+    crate::lock_mut!(crate::handlers::resources::ETH_UI)
+        .lock(crate::handlers::resources::EthAccessors::Tx)
+        .take();
 }
 
 #[no_mangle]

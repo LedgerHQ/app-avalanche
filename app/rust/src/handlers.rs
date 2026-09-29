@@ -83,16 +83,6 @@ pub mod resources {
     #[lazy_static]
     pub static mut RECEIVED_BYTES: Lock<u64, StreamingAccessors> = Lock::new(0);
 
-    /// Flag to track if streaming mode was used for the current transaction
-    /// Used in: rs_eth_was_streaming_mode_used() C function for external queries
-    #[lazy_static]
-    pub static mut STREAMING_MODE_USED: Lock<bool, StreamingAccessors> = Lock::new(false);
-
-    /// Stores the final computed hash from streaming mode
-    /// Used in: finalize_streaming_hash() to store result, rs_eth_get_streaming_hash() to retrieve for blind signing UI
-    #[lazy_static]
-    pub static mut STREAMING_HASH: Lock<Option<[u8; 32]>, StreamingAccessors> = Lock::new(None);
-
     /// Store chain ID and transaction type for correct V calculation in streaming mode
     /// Critical for EIP-155 signature compatibility between streaming and normal modes
     /// Chain ID bytes extracted from transaction for V component calculation
