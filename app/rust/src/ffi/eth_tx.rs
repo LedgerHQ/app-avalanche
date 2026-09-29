@@ -25,7 +25,7 @@ pub unsafe fn num_items_eth(ctx: *const parser_context_t, num_items: &mut u8) ->
                 *num_items = n;
                 ParserError::ParserOk as _
             }
-            Err(e) => e as _,
+            Err(e) => ParserError::from(e) as _,
         }
     } else {
         ParserError::NoData as _
@@ -58,13 +58,10 @@ pub unsafe fn get_eth_item(
     }
 
     if let Some(obj) = crate::lock_mut!(ETH_UI).lock(EthAccessors::Tx) {
-        match obj.render_item(display_idx, key, value, page_idx) {
-            Ok(page) => {
-                *page_count = page;
-                ParserError::ParserOk as _
-            }
-            Err(e) => e as _,
-        }
+        super::render_result(
+            obj.render_item(display_idx, key, value, page_idx),
+            page_count,
+        )
     } else {
         ParserError::NoData as _
     }

@@ -1,5 +1,6 @@
 use arrayvec::CapacityError;
 use nom::error::ErrorKind;
+use zemu_sys::ViewError;
 
 #[repr(u32)]
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -71,6 +72,21 @@ impl From<ErrorKind> for ParserError {
     }
 }
 
+// ViewError::Unknown is 0, which C reads as parser_ok: a render error cast
+// straight to u32 was reported as success and zxlib skipped the item. Every
+// variant must map to a non-zero error, and not to NoData either: tx_getItem
+// turns parser_no_data into zxerr_no_data, which the Nano X/S+ review takes
+// as the end of the items and jumps to approval.
+impl From<ViewError> for ParserError {
+    fn from(err: ViewError) -> Self {
+        match err {
+            ViewError::Unknown | ViewError::NoData | ViewError::Reject => {
+                ParserError::UnexpectedError
+            }
+        }
+    }
+}
+
 impl<I> nom::error::ParseError<I> for ParserError {
     fn from_error_kind(_input: I, kind: ErrorKind) -> Self {
         Self::from(kind)
@@ -101,6 +117,20 @@ impl From<nom::Err<Self>> for ParserError {
             nom::Err::Error(e) => e,
             nom::Err::Failure(e) => e,
             nom::Err::Incomplete(_) => Self::UnexpectedBufferEnd,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_errors_are_never_parser_ok() {
+        for e in [ViewError::Unknown, ViewError::NoData, ViewError::Reject] {
+            let err = ParserError::from(e);
+            assert_ne!(err, ParserError::ParserOk);
+            assert_ne!(err, ParserError::NoData);
         }
     }
 }

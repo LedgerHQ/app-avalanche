@@ -98,11 +98,12 @@ pub unsafe extern "C" fn _addr_get_item(
         (ui.assume_init_mut(), out_key, out_value)
     };
 
-    let Ok(page) = ui.render_item(display_idx, out_key, out_value, page_idx) else {
-        return ZxError::NoData as u16;
-    };
-
-    *page_count = page;
-
-    ZxError::Ok as u16
+    super::render_review_item(
+        ui,
+        display_idx,
+        out_key,
+        out_value,
+        page_idx,
+        &mut *page_count,
+    ) as u16
 }

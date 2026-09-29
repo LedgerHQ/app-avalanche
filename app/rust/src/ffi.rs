@@ -22,6 +22,7 @@ use crate::handlers::avax::signing::Sign;
 use crate::parser::{parse_path_list, AvaxMessage, DisplayableItem, ObjectList, PathWrapper};
 use crate::parser::{FromBytes, ParserError, Transaction};
 use crate::ZxError;
+use zemu_sys::{ViewError, Viewable};
 
 pub mod context;
 mod eth_tx;
@@ -66,6 +67,34 @@ unsafe fn state_as<'a, T>(
     }
 
     Ok(&mut *state.cast::<MaybeUninit<T>>())
+}
+
+/// Renders item `display_idx` of an address, xpub or wallet id review for
+/// zxlib, which ends a review when the item past the last one returns
+/// zxerr_no_data. NoData is kept for that case only: an item in range that
+/// fails to render, or renders no pages, must not look the same, or the Nano
+/// review would skip it and jump to approval.
+fn render_review_item(
+    ui: &mut impl Viewable,
+    display_idx: u8,
+    key: &mut [u8],
+    value: &mut [u8],
+    page_idx: u8,
+    page_count: &mut u8,
+) -> ZxError {
+    match ui.num_items() {
+        Ok(n) if display_idx >= n => return ZxError::NoData,
+        Ok(_) => {}
+        Err(_) => return ZxError::Unknown,
+    }
+
+    match ui.render_item(display_idx, key, value, page_idx) {
+        Ok(page) if page > 0 => {
+            *page_count = page;
+            ZxError::Ok
+        }
+        _ => ZxError::Unknown,
+    }
 }
 
 // Innitialize internals for transaction processing
@@ -258,7 +287,7 @@ unsafe fn num_items_avax(ctx: *const parser_context_t, num_items: &mut u8) -> u3
                     *num_items = n;
                     ParserError::ParserOk as u32
                 }
-                Err(e) => e as u32,
+                Err(e) => ParserError::from(e) as u32,
             }
         }
 
@@ -310,6 +339,21 @@ pub unsafe extern "C" fn _getItem(
     }
 }
 
+/// Converts the result of rendering a review item for C. A render error maps
+/// to a non-zero error (see `From<ViewError> for ParserError`), and so does an
+/// item that renders no pages, which zxlib would skip without telling the
+/// user.
+fn render_result(result: Result<u8, ViewError>, page_count: &mut u8) -> u32 {
+    match result {
+        Ok(0) => ParserError::UnexpectedError as u32,
+        Ok(page) => {
+            *page_count = page;
+            ParserError::ParserOk as u32
+        }
+        Err(e) => ParserError::from(e) as u32,
+    }
+}
+
 #[inline(never)]
 unsafe fn get_avax_item(
     ctx: *const parser_context_t,
@@ -338,13 +382,10 @@ unsafe fn get_avax_item(
                 Err(e) => return e as u32,
             };
             let obj = tx.assume_init_mut();
-            match obj.render_item(display_idx, key, value, page_idx) {
-                Ok(page) => {
-                    *page_count = page;
-                    ParserError::ParserOk as _
-                }
-                Err(e) => e as _,
-            }
+            render_result(
+                obj.render_item(display_idx, key, value, page_idx),
+                page_count,
+            )
         }
 
         Instruction::SignAvaxHash => {
@@ -358,13 +399,10 @@ unsafe fn get_avax_item(
                 return ParserError::NoData as _;
             };
             let mut ui = SignUI::new(*hash);
-            match zemu_sys::Viewable::render_item(&mut ui, display_idx, key, value, page_idx) {
-                Ok(page) => {
-                    *page_count = page;
-                    ParserError::ParserOk as _
-                }
-                Err(e) => e as _,
-            }
+            render_result(
+                zemu_sys::Viewable::render_item(&mut ui, display_idx, key, value, page_idx),
+                page_count,
+            )
         }
 
         Instruction::SignAvaxMsg => {
@@ -373,13 +411,10 @@ unsafe fn get_avax_item(
                 Err(e) => return e as u32,
             };
             let obj = msg.assume_init_mut();
-            match obj.render_item(display_idx, key, value, page_idx) {
-                Ok(page) => {
-                    *page_count = page;
-                    ParserError::ParserOk as _
-                }
-                Err(e) => e as _,
-            }
+            render_result(
+                obj.render_item(display_idx, key, value, page_idx),
+                page_count,
+            )
         }
         _ => ParserError::NoData as _,
     }
@@ -555,6 +590,178 @@ mod tests {
             &avax_msg_data(),
             size_of::<AvaxMessage>(),
         );
+    }
+
+    #[test]
+    fn render_result_rejects_errors_and_empty_items() {
+        let mut page_count = 0u8;
+        assert_eq!(
+            render_result(Ok(0), &mut page_count),
+            ParserError::UnexpectedError as u32
+        );
+        for e in [ViewError::Unknown, ViewError::NoData, ViewError::Reject] {
+            assert_eq!(
+                render_result(Err(e), &mut page_count),
+                ParserError::UnexpectedError as u32
+            );
+        }
+        assert_eq!(page_count, 0);
+
+        assert_eq!(
+            render_result(Ok(2), &mut page_count),
+            ParserError::ParserOk as u32
+        );
+        assert_eq!(page_count, 2);
+    }
+
+    #[test]
+    #[cfg_attr(not(miri), file_serial(path))]
+    fn eth_render_errors_are_not_reported_as_ok() {
+        use crate::handlers::eth::personal_msg::Sign as EthSignMsg;
+
+        const MSG: &[u8] = b"\x00\x00\x00\x05hello";
+        EthSignMsg::start_parse(MSG).unwrap();
+
+        let mut state = StateBuffer([0; STATE_SIZE]);
+        let guarded = GuardedCtx::new(Instruction::SignEthMsg, &[], &mut state, 0);
+
+        let mut key = [0i8; 40];
+        let mut value = [0i8; 40];
+        let mut page_count = 0u8;
+        let mut get_item = |value: &mut [i8]| unsafe {
+            _getItem(
+                &guarded.ctx,
+                0,
+                key.as_mut_ptr(),
+                key.len() as u16,
+                value.as_mut_ptr(),
+                value.len() as u16,
+                0,
+                &mut page_count,
+            )
+        };
+
+        assert_eq!(get_item(&mut value), ParserError::ParserOk as u32);
+        // no room for anything but the terminator: ViewError::Unknown
+        assert_eq!(
+            get_item(&mut value[..1]),
+            ParserError::UnexpectedError as u32
+        );
+    }
+
+    /// Item 0 renders, item 1 fails, item 2 renders no pages.
+    struct ThreeItems;
+
+    impl Viewable for ThreeItems {
+        fn num_items(&mut self) -> Result<u8, ViewError> {
+            Ok(3)
+        }
+
+        fn render_item(
+            &mut self,
+            idx: u8,
+            _: &mut [u8],
+            _: &mut [u8],
+            _: u8,
+        ) -> Result<u8, ViewError> {
+            match idx {
+                0 => Ok(1),
+                1 => Err(ViewError::NoData),
+                2 => Ok(0),
+                _ => Err(ViewError::NoData),
+            }
+        }
+
+        fn accept(&mut self, _: &mut [u8]) -> (usize, u16) {
+            (0, 0)
+        }
+
+        fn reject(&mut self, _: &mut [u8]) -> (usize, u16) {
+            (0, 0)
+        }
+    }
+
+    #[test]
+    fn address_review_errors_are_not_no_data() {
+        let mut key = [0u8; 40];
+        let mut value = [0u8; 40];
+        let mut page_count = 0u8;
+        let mut render = |idx| {
+            render_review_item(
+                &mut ThreeItems,
+                idx,
+                &mut key,
+                &mut value,
+                0,
+                &mut page_count,
+            )
+        };
+
+        assert_eq!(render(0), ZxError::Ok);
+        assert_eq!(render(1), ZxError::Unknown);
+        assert_eq!(render(2), ZxError::Unknown);
+        // past the last item: how zxlib learns the review is over
+        assert_eq!(render(3), ZxError::NoData);
+    }
+
+    #[test]
+    fn wallet_id_render_error_is_not_no_data() {
+        use crate::handlers::wallet_id::WalletIdUI;
+
+        let mut ui = MaybeUninit::<WalletIdUI>::zeroed();
+        let ui = ui.as_mut_ptr().cast::<u8>();
+        let mut key = [0u8; 40];
+        let mut value = [0u8; 40];
+        let mut page_count = 0u8;
+        let mut get_item = |idx, value: &mut [u8]| unsafe {
+            wallet_id::_wallet_get_item(
+                ui,
+                idx,
+                key.as_mut_ptr(),
+                key.len() as u16,
+                value.as_mut_ptr(),
+                value.len() as u16,
+                0,
+                &mut page_count,
+            )
+        };
+
+        assert_eq!(get_item(0, &mut value), ZxError::Ok as u16);
+        // no room for anything but the terminator: ViewError::Unknown
+        assert_eq!(get_item(0, &mut value[..1]), ZxError::Unknown as u16);
+        assert_eq!(get_item(1, &mut value), ZxError::NoData as u16);
+    }
+
+    #[test]
+    fn render_errors_are_not_reported_as_ok() {
+        let data = avax_msg_data();
+        let mut state = StateBuffer([0; STATE_SIZE]);
+        let mut guarded = GuardedCtx::new(
+            Instruction::SignAvaxMsg,
+            &data,
+            &mut state,
+            size_of::<AvaxMessage>(),
+        );
+        let ctx: *mut parser_context_t = &mut guarded.ctx;
+        assert_eq!(unsafe { _parser_read(ctx) }, ParserError::ParserOk as u32);
+
+        // no room for anything but the terminator: ViewError::Unknown
+        let mut key = [0i8; 40];
+        let mut value = [0i8; 1];
+        let mut page_count = 0u8;
+        let err = unsafe {
+            _getItem(
+                ctx,
+                0,
+                key.as_mut_ptr(),
+                key.len() as u16,
+                value.as_mut_ptr(),
+                value.len() as u16,
+                0,
+                &mut page_count,
+            )
+        };
+        assert_eq!(err, ParserError::UnexpectedError as u32);
     }
 
     #[test]

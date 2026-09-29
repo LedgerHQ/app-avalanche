@@ -111,6 +111,10 @@ parser_error_t parser_validate(const parser_context_t *ctx) {
     for (uint8_t idx = 0; idx < numItems; idx++) {
         uint8_t pageCount = 0;
         CHECK_ERROR(parser_getItem(ctx, idx, tmpKey, sizeof(tmpKey), tmpVal, sizeof(tmpVal), 0, &pageCount))
+        // The UI skips an item with no pages, so it would never be shown
+        if (pageCount == 0) {
+            return parser_display_page_out_of_range;
+        }
     }
     return parser_ok;
 }
