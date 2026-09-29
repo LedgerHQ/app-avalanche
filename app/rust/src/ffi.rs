@@ -297,8 +297,18 @@ unsafe fn num_items_avax(ctx: *const parser_context_t, num_items: &mut u8) -> u3
         }
 
         Instruction::SignAvaxMsg => {
-            *num_items = 1;
-            ParserError::ParserOk as u32
+            let msg = match state_as::<AvaxMessage>(ctx) {
+                Ok(msg) => msg,
+                Err(e) => return e as u32,
+            };
+            let obj = msg.assume_init_mut();
+            match obj.num_items() {
+                Ok(n) => {
+                    *num_items = n;
+                    ParserError::ParserOk as u32
+                }
+                Err(e) => ParserError::from(e) as u32,
+            }
         }
         _ => ParserError::InvalidTransactionType as u32,
     }
@@ -623,6 +633,66 @@ mod tests {
             &avax_msg_data(),
             size_of::<AvaxMessage>(),
         );
+    }
+
+    #[test]
+    fn avax_msg_review_shows_the_whole_message() {
+        let text: Vec<u8> = (0..350).map(|i| b'a' + (i % 26) as u8).collect();
+        let mut data = b"\x1AAvalanche Signed Message:\n".to_vec();
+        data.extend_from_slice(&(text.len() as u32).to_be_bytes());
+        data.extend_from_slice(&text);
+
+        let expected = AvaxMessage::new(&data).unwrap().num_items().unwrap();
+        assert!(expected > 2, "the message should span several items");
+
+        let mut state = StateBuffer([0; STATE_SIZE]);
+        let mut guarded = GuardedCtx::new(
+            Instruction::SignAvaxMsg,
+            &data,
+            &mut state,
+            size_of::<AvaxMessage>(),
+        );
+        let ctx: *mut parser_context_t = &mut guarded.ctx;
+        assert_eq!(unsafe { _parser_read(ctx) }, ParserError::ParserOk as u32);
+
+        let mut num_items = 0u8;
+        assert_eq!(
+            unsafe { _getNumItems(ctx, &mut num_items) },
+            ParserError::ParserOk as u32
+        );
+        assert_eq!(num_items, expected);
+
+        // every page of every item after the "Sign" one, put back together
+        let mut shown = Vec::new();
+        for idx in 1..num_items {
+            let mut page_idx = 0;
+            loop {
+                let mut key = [0i8; 40];
+                let mut value = [0i8; 40];
+                let mut page_count = 0u8;
+                let err = unsafe {
+                    _getItem(
+                        ctx,
+                        idx,
+                        key.as_mut_ptr(),
+                        key.len() as u16,
+                        value.as_mut_ptr(),
+                        value.len() as u16,
+                        page_idx,
+                        &mut page_count,
+                    )
+                };
+                assert_eq!(err, ParserError::ParserOk as u32, "item {idx}/{page_idx}");
+                let value = unsafe { core::ffi::CStr::from_ptr(value.as_ptr()) };
+                shown.extend_from_slice(value.to_bytes());
+
+                page_idx += 1;
+                if page_idx == page_count {
+                    break;
+                }
+            }
+        }
+        assert_eq!(shown, text);
     }
 
     #[test]
