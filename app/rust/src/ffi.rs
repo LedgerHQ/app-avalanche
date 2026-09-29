@@ -14,7 +14,7 @@
 *  limitations under the License.
 ********************************************************************************/
 
-use core::{mem::MaybeUninit, ptr::addr_of_mut};
+use core::mem::{size_of, MaybeUninit};
 
 use crate::constants::{BIP32_PATH_SUFFIX_DEPTH, SIGN_HASH_TX_SIZE};
 use crate::handlers::avax::sign_hash::{Sign as SignHash, SignUI};
@@ -33,18 +33,39 @@ pub mod wallet_id;
 use context::{parser_context_t, Instruction};
 use eth_tx::{get_eth_item, num_items_eth};
 
-/// Cast a *mut u8 to a *mut Transaction
-macro_rules! avax_tx_from_state {
-    ($ptr:expr) => {
-        unsafe { &mut (*addr_of_mut!((*$ptr).tx_obj.state).cast::<MaybeUninit<Transaction>>()) }
-    };
-}
+/// Size of `parser_buffer` in app/src/parser.c, the buffer C allocates and
+/// hands over as `tx_obj.state`.
+const PARSER_BUFFER_SIZE: usize = 256;
 
-/// Cast a *mut u8 to a *mut AvaxMessage
-macro_rules! avax_msg_from_state {
-    ($ptr:expr) => {
-        unsafe { &mut (*addr_of_mut!((*$ptr).tx_obj.state).cast::<MaybeUninit<AvaxMessage>>()) }
-    };
+// Checked on the device only: pointers are 8 bytes on the host, where
+// `Transaction` is larger and tests provide their own state buffer.
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(
+    size_of::<Transaction>() <= PARSER_BUFFER_SIZE
+        && size_of::<AvaxMessage>() <= PARSER_BUFFER_SIZE
+);
+
+/// Returns the buffer `tx_obj.state` points to as a `T`, provided it is not
+/// null and is large enough and aligned for a `T`.
+///
+/// # Safety
+///
+/// `ctx` must be valid, and a non-null `tx_obj.state` must point to
+/// `tx_obj.len` writable bytes that nothing else references.
+unsafe fn state_as<'a, T>(
+    ctx: *const parser_context_t,
+) -> Result<&'a mut MaybeUninit<T>, ParserError> {
+    let state = (*ctx).tx_obj.state;
+
+    if state.is_null() {
+        return Err(ParserError::NoData);
+    }
+
+    if ((*ctx).tx_obj.len as usize) < size_of::<T>() || !state.cast::<T>().is_aligned() {
+        return Err(ParserError::ParserContextMismatch);
+    }
+
+    Ok(&mut *state.cast::<MaybeUninit<T>>())
 }
 
 // Innitialize internals for transaction processing
@@ -157,7 +178,10 @@ pub unsafe extern "C" fn _parser_read(ctx: *const parser_context_t) -> u32 {
 
             let mut path_list = path_list.assume_init();
 
-            let tx = avax_tx_from_state!(ctx as *mut parser_context_t);
+            let tx = match state_as::<Transaction>(ctx) {
+                Ok(tx) => tx,
+                Err(e) => return e as u32,
+            };
             match Transaction::new_into(rem, tx) {
                 Ok(_) => {
                     // now disable transaction outputs that match
@@ -182,7 +206,10 @@ pub unsafe extern "C" fn _parser_read(ctx: *const parser_context_t) -> u32 {
         }
 
         Instruction::SignAvaxMsg => {
-            let tx = avax_msg_from_state!(ctx as *mut parser_context_t);
+            let tx = match state_as::<AvaxMessage>(ctx) {
+                Ok(tx) => tx,
+                Err(e) => return e as u32,
+            };
             match AvaxMessage::from_bytes_into(data, tx) {
                 Ok(_) => ParserError::ParserOk as u32,
                 Err(_) => ParserError::InvalidAvaxMessage as u32,
@@ -221,13 +248,10 @@ unsafe fn num_items_avax(ctx: *const parser_context_t, num_items: &mut u8) -> u3
 
     match tx_type {
         Instruction::SignAvaxTx => {
-            let state = (*ctx).tx_obj.state;
-
-            if state.is_null() {
-                return ParserError::NoData as u32;
-            }
-
-            let tx = avax_tx_from_state!(ctx as *mut parser_context_t);
+            let tx = match state_as::<Transaction>(ctx) {
+                Ok(tx) => tx,
+                Err(e) => return e as u32,
+            };
             let obj = tx.assume_init_mut();
             match obj.num_items() {
                 Ok(n) => {
@@ -309,13 +333,10 @@ unsafe fn get_avax_item(
 
     match tx_type {
         Instruction::SignAvaxTx => {
-            let state = (*ctx).tx_obj.state;
-
-            if state.is_null() {
-                return ParserError::NoData as u32;
-            }
-
-            let tx = avax_tx_from_state!(ctx as *mut parser_context_t);
+            let tx = match state_as::<Transaction>(ctx) {
+                Ok(tx) => tx,
+                Err(e) => return e as u32,
+            };
             let obj = tx.assume_init_mut();
             match obj.render_item(display_idx, key, value, page_idx) {
                 Ok(page) => {
@@ -347,13 +368,10 @@ unsafe fn get_avax_item(
         }
 
         Instruction::SignAvaxMsg => {
-            let state = (*ctx).tx_obj.state;
-
-            if state.is_null() {
-                return ParserError::NoData as u32;
-            }
-
-            let msg = avax_msg_from_state!(ctx as *mut parser_context_t);
+            let msg = match state_as::<AvaxMessage>(ctx) {
+                Ok(msg) => msg,
+                Err(e) => return e as u32,
+            };
             let obj = msg.assume_init_mut();
             match obj.render_item(display_idx, key, value, page_idx) {
                 Ok(page) => {
@@ -398,4 +416,173 @@ pub unsafe extern "C" fn _tx_data_offset(
     *offset = buffer_len - rem.len() as u16;
 
     ZxError::Ok as _
+}
+
+#[cfg(test)]
+mod tests {
+    use std::vec::Vec;
+
+    use serial_test::file_serial;
+
+    use super::context::{_set_root_path, parse_tx_t};
+    use super::*;
+
+    // Transfer transaction, same bytes as parser::transactions::tests::DATA
+    const TRANSFER_TX: &str = "00000000000000000005ab68eb1ee142a05cfe768c36e11f0b596db5a3c6c77aabe665dad9e638ca94f7000000023d9bdac0ed1d761330cf680efdeb1a42159eb387d6d2950c96f7d28f61bbe2aa00000007000000003b9aca0000000000000000000000000100000001636fb961b8bce4d0038796f5db330fecc8e36f723d9bdac0ed1d761330cf680efdeb1a42159eb387d6d2950c96f7d28f61bbe2aa0000000700000000f44284800000000000000000000000010000000107fe53d8ed2b004df3ac75175a4e727a6dd461d8000000023be4ead93aa5e6396d1f2c6e9587c7642b30d52d605f917d8a402e6823f965f2000000003d9bdac0ed1d761330cf680efdeb1a42159eb387d6d2950c96f7d28f61bbe2aa000000050000000005e69ec0000000010000000095aff4ba72647c2a6a41802c047a9f3a3919b35aefcf7da843d4cc34980c7102000000003d9bdac0ed1d761330cf680efdeb1a42159eb387d6d2950c96f7d28f61bbe2aa00000005000000012a05f200000000010000000000000000";
+
+    const CANARY: u8 = 0xAA;
+    const STATE_SIZE: usize = 512;
+
+    /// The C `parser_context_t` followed by a canary, so a write that lands
+    /// on the context instead of the buffer `tx_obj.state` points to shows up.
+    #[repr(C)]
+    struct GuardedCtx {
+        ctx: parser_context_t,
+        canary: [u8; STATE_SIZE],
+    }
+
+    /// Stands in for `parser_buffer`, sized for the host `Transaction`.
+    #[repr(C, align(8))]
+    struct StateBuffer([u8; STATE_SIZE]);
+
+    impl GuardedCtx {
+        fn new(ins: Instruction, data: &[u8], state: &mut StateBuffer, len: usize) -> Self {
+            Self {
+                ctx: parser_context_t {
+                    buffer: data.as_ptr(),
+                    buffer_len: data.len() as u16,
+                    offset: 0,
+                    ins: ins as u8,
+                    tx_obj: parse_tx_t {
+                        state: state.0.as_mut_ptr(),
+                        len: len as u32,
+                    },
+                },
+                canary: [CANARY; STATE_SIZE],
+            }
+        }
+    }
+
+    fn set_avax_root_path() {
+        // m/44'/9000'/0'
+        let mut path = std::vec![3u8];
+        for c in [0x8000_002c_u32, 0x8000_2328, 0x8000_0000] {
+            path.extend_from_slice(&c.to_be_bytes());
+        }
+        let err = unsafe { _set_root_path(path.as_ptr(), path.len() as u16) };
+        assert_eq!(err, ParserError::ParserOk as u32);
+    }
+
+    fn avax_tx_data() -> Vec<u8> {
+        // no change paths, then the transaction
+        let mut data = std::vec![0u8];
+        data.extend(hex::decode(TRANSFER_TX).unwrap());
+        data
+    }
+
+    fn avax_msg_data() -> Vec<u8> {
+        let msg = b"Hello, Avalanche";
+        let mut data = b"\x1AAvalanche Signed Message:\n".to_vec();
+        data.extend_from_slice(&(msg.len() as u32).to_be_bytes());
+        data.extend_from_slice(msg);
+        data
+    }
+
+    /// Renders every item, as `parser_validate` does.
+    fn render_all(ctx: *const parser_context_t) {
+        let mut num_items = 0u8;
+        assert_eq!(
+            unsafe { _getNumItems(ctx, &mut num_items) },
+            ParserError::ParserOk as u32
+        );
+        assert!(num_items > 0);
+
+        let mut key = [0i8; 40];
+        let mut value = [0i8; 40];
+        for idx in 0..num_items {
+            let mut page_count = 0u8;
+            let err = unsafe {
+                _getItem(
+                    ctx,
+                    idx,
+                    key.as_mut_ptr(),
+                    key.len() as u16,
+                    value.as_mut_ptr(),
+                    value.len() as u16,
+                    0,
+                    &mut page_count,
+                )
+            };
+            assert_eq!(err, ParserError::ParserOk as u32, "item {idx}");
+            assert!(page_count > 0, "item {idx}");
+        }
+    }
+
+    fn assert_parsed_into_state(ins: Instruction, data: &[u8], len: usize) {
+        let mut state = StateBuffer([0; STATE_SIZE]);
+        let state_ptr = state.0.as_mut_ptr();
+        let mut guarded = GuardedCtx::new(ins, data, &mut state, len);
+        let ctx: *mut parser_context_t = &mut guarded.ctx;
+
+        assert_eq!(unsafe { _parser_read(ctx) }, ParserError::ParserOk as u32);
+
+        // the context and whatever follows it are untouched
+        assert_eq!(guarded.ctx.tx_obj.state, state_ptr);
+        assert_eq!(guarded.ctx.tx_obj.len, len as u32);
+        assert!(guarded.canary.iter().all(|b| *b == CANARY));
+
+        render_all(ctx);
+
+        // the object was written into the state buffer
+        assert!(state.0[..len].iter().any(|b| *b != 0));
+    }
+
+    #[test]
+    #[cfg_attr(not(miri), file_serial(path))]
+    fn avax_tx_is_parsed_into_state_buffer() {
+        set_avax_root_path();
+        assert_parsed_into_state(
+            Instruction::SignAvaxTx,
+            &avax_tx_data(),
+            size_of::<Transaction>(),
+        );
+    }
+
+    #[test]
+    fn avax_msg_is_parsed_into_state_buffer() {
+        assert_parsed_into_state(
+            Instruction::SignAvaxMsg,
+            &avax_msg_data(),
+            size_of::<AvaxMessage>(),
+        );
+    }
+
+    #[test]
+    fn state_buffer_is_checked() {
+        let data = avax_msg_data();
+        let len = size_of::<AvaxMessage>();
+
+        // too small
+        let mut state = StateBuffer([0; STATE_SIZE]);
+        let mut guarded = GuardedCtx::new(Instruction::SignAvaxMsg, &data, &mut state, len - 1);
+        assert_eq!(
+            unsafe { _parser_read(&guarded.ctx) },
+            ParserError::ParserContextMismatch as u32
+        );
+
+        // misaligned
+        guarded.ctx.tx_obj.state = unsafe { state.0.as_mut_ptr().add(1) };
+        guarded.ctx.tx_obj.len = len as u32;
+        assert_eq!(
+            unsafe { _parser_read(&guarded.ctx) },
+            ParserError::ParserContextMismatch as u32
+        );
+
+        // not allocated
+        guarded.ctx.tx_obj.state = core::ptr::null_mut();
+        assert_eq!(
+            unsafe { _parser_read(&guarded.ctx) },
+            ParserError::NoData as u32
+        );
+    }
 }
