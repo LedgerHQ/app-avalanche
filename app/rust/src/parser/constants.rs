@@ -81,7 +81,8 @@ pub const PVM_SET_L1_VALIDATOR_WEIGHT: u32 = 0x00000025;
 pub const PVM_DISABLE_L1_VALIDATOR: u32 = 0x00000027;
 pub const PVM_INCREASE_L1_VALIDATOR_BALANCE: u32 = 0x00000026;
 
-// ACP-236: Auto-renewed staking (placeholder TypeID)
+// ACP-236: Auto-renewed staking. Registered in avalanchego v1.15.0
+// (RegisterHeliconTypes), so these are the final type IDs.
 pub const PVM_ADD_AUTO_RENEWED_VALIDATOR: u32 = 0x00000028;
 pub const PVM_SET_AUTO_RENEWED_VALIDATOR_CONFIG: u32 = 0x00000029;
 
