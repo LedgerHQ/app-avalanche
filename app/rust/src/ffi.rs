@@ -46,6 +46,12 @@ const _: () = assert!(
         && size_of::<AvaxMessage>() <= PARSER_BUFFER_SIZE
 );
 
+/// Most items a review can hold. The Nano review adds the approve screen to
+/// the item count in a uint8_t (zxlib view_nano.c, h_review_update_data; the
+/// supported Nanos have no intro pages), so 255 items wrap it to 0 and the
+/// approve screen can never be reached.
+const MAX_REVIEW_ITEMS: u8 = u8::MAX - 1;
+
 /// Returns the buffer `tx_obj.state` points to as a `T`, provided it is not
 /// null and is large enough and aligned for a `T`.
 ///
@@ -262,11 +268,17 @@ pub unsafe extern "C" fn _getNumItems(ctx: *const parser_context_t, num_items: *
 
     let num_items = &mut *num_items;
 
-    if tx_type.is_avax() {
+    let err = if tx_type.is_avax() {
         num_items_avax(ctx, num_items)
     } else {
         num_items_eth(ctx, num_items)
+    };
+
+    if err == ParserError::ParserOk as u32 && *num_items > MAX_REVIEW_ITEMS {
+        return ParserError::UnexpectedNumberItems as u32;
     }
+
+    err
 }
 
 #[inline(never)]
@@ -556,6 +568,28 @@ mod tests {
         }
         data.extend_from_slice(inputs_and_memo);
         data
+    }
+
+    /// A transfer that renders exactly `target` items, found by varying how
+    /// many outputs it has and how many addresses each carries.
+    fn transfer_with_num_items(target: u8) -> Vec<u8> {
+        for outputs in (1..=64usize).rev() {
+            for addresses in 1..=8 {
+                for extra in 0..=8 {
+                    let mut per_output = std::vec![addresses; outputs];
+                    per_output[0] += extra;
+                    let data = transfer_with_outputs(&per_output);
+                    // skip the empty change path list
+                    let num_items = Transaction::new(&data[1..]).map(|tx| tx.num_items());
+                    if let Ok(Ok(n)) = num_items {
+                        if n == target {
+                            return data;
+                        }
+                    }
+                }
+            }
+        }
+        panic!("no transfer renders {target} items");
     }
 
     fn avax_msg_data() -> Vec<u8> {
@@ -976,5 +1010,36 @@ mod tests {
             unsafe { _getNumItems(&guarded.ctx, &mut num_items) },
             ParserError::NoData as u32
         );
+    }
+
+    #[test]
+    #[cfg_attr(not(miri), file_serial(path))]
+    fn num_items_is_capped_for_the_nano_review() {
+        set_avax_root_path();
+
+        for (items, expected) in [
+            (MAX_REVIEW_ITEMS, ParserError::ParserOk),
+            (MAX_REVIEW_ITEMS + 1, ParserError::UnexpectedNumberItems),
+        ] {
+            let data = transfer_with_num_items(items);
+            let mut state = StateBuffer([0; STATE_SIZE]);
+            let guarded = GuardedCtx::new(
+                Instruction::SignAvaxTx,
+                &data,
+                &mut state,
+                size_of::<Transaction>(),
+            );
+            assert_eq!(
+                unsafe { _parser_read(&guarded.ctx) },
+                ParserError::ParserOk as u32
+            );
+
+            let mut num_items = 0u8;
+            assert_eq!(
+                unsafe { _getNumItems(&guarded.ctx, &mut num_items) },
+                expected as u32,
+                "{items} items"
+            );
+        }
     }
 }
