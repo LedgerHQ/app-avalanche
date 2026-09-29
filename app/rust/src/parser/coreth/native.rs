@@ -318,6 +318,49 @@ impl DisplayableItem for EthTransaction<'_> {
     }
 }
 
+/// Minimal RLP encoder used to build transactions in tests
+#[cfg(test)]
+pub(crate) mod rlp_test_utils {
+    use std::vec::Vec;
+
+    fn header(offset: u8, len: usize) -> Vec<u8> {
+        if len <= 55 {
+            std::vec![offset + len as u8]
+        } else {
+            let be = (len as u64).to_be_bytes();
+            let skip = be.iter().take_while(|b| **b == 0).count();
+            let mut out = std::vec![offset + 55 + (8 - skip) as u8];
+            out.extend_from_slice(&be[skip..]);
+            out
+        }
+    }
+
+    /// Encode a byte string
+    pub fn item(bytes: &[u8]) -> Vec<u8> {
+        if bytes.len() == 1 && bytes[0] < 0x80 {
+            return bytes.to_vec();
+        }
+        let mut out = header(0x80, bytes.len());
+        out.extend_from_slice(bytes);
+        out
+    }
+
+    /// Encode an unsigned integer (minimal big-endian)
+    pub fn uint(v: u128) -> Vec<u8> {
+        let be = v.to_be_bytes();
+        let skip = be.iter().take_while(|b| **b == 0).count();
+        item(&be[skip..])
+    }
+
+    /// Encode a list of already encoded items
+    pub fn list(items: &[Vec<u8>]) -> Vec<u8> {
+        let payload: Vec<u8> = items.concat();
+        let mut out = header(0xC0, payload.len());
+        out.extend(payload);
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::prelude::v1::*;
@@ -378,6 +421,190 @@ mod tests {
         assert!(!is_avax_chain_bytes(&[]));
         // 9 bytes → bytes_to_u64 errors → foreign (conservative default)
         assert!(!is_avax_chain_bytes(&[0, 0, 0, 0, 0, 0, 0, 0xa8, 0x6a]));
+    }
+
+    /// Parse `data` as an [`EthTransaction`] and return every rendered page
+    /// as `"title: message"`.
+    pub(crate) fn render_all(data: Vec<u8>) -> Vec<String> {
+        use crate::parser::snapshots_common::{with_leaked, ReducedPage};
+
+        unsafe {
+            with_leaked(data, |data| {
+                let (_, tx) = EthTransaction::from_bytes(data).expect("parse tx from data");
+
+                let mut driver = zuit::MockDriver::<_, 18, 1024>::new(tx);
+                driver.drive();
+
+                driver
+                    .out_ui()
+                    .iter()
+                    .flat_map(|item| {
+                        item.iter()
+                            .map(|p| std::format!("{}", ReducedPage::from(p)))
+                    })
+                    .collect()
+            })
+        }
+    }
+
+    const EOA: [u8; 20] = [0xa1; 20];
+    const RECIPIENT: [u8; 20] = [0xb2; 20];
+    // 100 AVAX in wei
+    const HUNDRED_AVAX: u128 = 100_000_000_000_000_000_000;
+
+    fn erc20_transfer_calldata() -> Vec<u8> {
+        let mut data = hex::decode("a9059cbb").unwrap();
+        data.extend_from_slice(&[0; 12]);
+        data.extend_from_slice(&RECIPIENT);
+        let mut amount = [0; 32];
+        amount[31] = 1;
+        data.extend_from_slice(&amount);
+        data
+    }
+
+    fn eip1559_tx(chain_id: u64, to: &[u8], value: u128, data: &[u8]) -> Vec<u8> {
+        use rlp_test_utils::*;
+        let mut tx = std::vec![EIP1559_TX];
+        tx.extend(list(&[
+            uint(chain_id as u128),
+            uint(1),
+            uint(1_000_000_000),
+            uint(30_000_000_000),
+            uint(100_000),
+            item(to),
+            uint(value),
+            item(data),
+            list(&[]),
+        ]));
+        tx
+    }
+
+    fn legacy_tx(chain_id: u64, to: &[u8], value: u128, data: &[u8]) -> Vec<u8> {
+        use rlp_test_utils::*;
+        list(&[
+            uint(1),
+            uint(30_000_000_000),
+            uint(100_000),
+            item(to),
+            uint(value),
+            item(data),
+            uint(chain_id as u128),
+            item(&[]),
+            item(&[]),
+        ])
+    }
+
+    fn eip2930_tx(chain_id: u64, to: &[u8], value: u128, data: &[u8]) -> Vec<u8> {
+        use rlp_test_utils::*;
+        let mut tx = std::vec![EIP2930_TX];
+        tx.extend(list(&[
+            uint(chain_id as u128),
+            uint(1),
+            uint(30_000_000_000),
+            uint(100_000),
+            item(to),
+            uint(value),
+            item(data),
+            list(&[]),
+        ]));
+        tx
+    }
+
+    fn shows_native_value(pages: &[String]) -> bool {
+        pages.iter().any(|p| p == "\"Value\": \"AVAX 100\"")
+    }
+
+    // AVAX-04: a token-shaped call to an EOA that also carries native value
+    // must put the native amount on screen.
+    #[test]
+    fn erc20_call_with_native_value_shows_value() {
+        let data = erc20_transfer_calldata();
+        let hidden: Vec<_> = [
+            (
+                "eip1559",
+                eip1559_tx(AVAX_C_CHAIN_MAINNET_ID, &EOA, HUNDRED_AVAX, &data),
+            ),
+            (
+                "eip2930",
+                eip2930_tx(AVAX_C_CHAIN_MAINNET_ID, &EOA, HUNDRED_AVAX, &data),
+            ),
+            (
+                "legacy",
+                legacy_tx(AVAX_C_CHAIN_MAINNET_ID, &EOA, HUNDRED_AVAX, &data),
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, tx)| {
+            let pages = render_all(tx.clone());
+            // the token view is kept, with the native value next to it
+            !(shows_native_value(&pages)
+                && pages.iter().any(|p| p == "\"ERC-20\": \"transfer\"")
+                && pages.iter().any(|p| p == "\"Amount\": \"1\""))
+        })
+        .map(|(name, _)| name)
+        .collect();
+        assert!(hidden.is_empty(), "native value hidden for {hidden:?}");
+    }
+
+    /// Store an NFT descriptor for `contract` on `chain_id`, as
+    /// INS_PROVIDE_NFT_INFORMATION would.
+    #[cfg(feature = "erc721")]
+    pub(crate) fn provide_nft_info(contract: &[u8; 20], chain_id: u64) {
+        let mut descriptor = std::vec![1u8, 1, 4];
+        descriptor.extend_from_slice(b"Test");
+        descriptor.extend_from_slice(contract);
+        descriptor.extend_from_slice(&chain_id.to_be_bytes());
+
+        let (_, info) = crate::parser::NftInfo::from_bytes(&descriptor).unwrap();
+        crate::parser::ERC721Info::set_info(info).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "erc721")]
+    #[serial_test::file_serial(path)]
+    fn erc721_call_with_native_value_shows_value() {
+        provide_nft_info(&EOA, AVAX_C_CHAIN_MAINNET_ID);
+
+        // transferFrom(from, to, 1)
+        let mut data = hex::decode("23b872dd").unwrap();
+        data.extend_from_slice(&[0; 12]);
+        data.extend_from_slice(&[0xc3; 20]);
+        data.extend_from_slice(&[0; 12]);
+        data.extend_from_slice(&RECIPIENT);
+        let mut token_id = [0; 32];
+        token_id[31] = 1;
+        data.extend_from_slice(&token_id);
+
+        let hidden: Vec<_> = [
+            (
+                "eip1559",
+                eip1559_tx(AVAX_C_CHAIN_MAINNET_ID, &EOA, HUNDRED_AVAX, &data),
+            ),
+            (
+                "legacy",
+                legacy_tx(AVAX_C_CHAIN_MAINNET_ID, &EOA, HUNDRED_AVAX, &data),
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, tx)| {
+            let pages = render_all(tx.clone());
+            !(shows_native_value(&pages) && pages.iter().any(|p| p.contains("ERC-721")))
+        })
+        .map(|(name, _)| name)
+        .collect();
+        assert!(hidden.is_empty(), "native value hidden for {hidden:?}");
+    }
+
+    #[test]
+    fn erc20_call_without_native_value_has_no_value_screen() {
+        let pages = render_all(eip1559_tx(
+            AVAX_C_CHAIN_MAINNET_ID,
+            &EOA,
+            0,
+            &erc20_transfer_calldata(),
+        ));
+        assert!(pages.iter().any(|p| p.contains("ERC-20")), "{pages:#?}");
+        assert!(!pages.iter().any(|p| p.contains("Value")), "{pages:#?}");
     }
 
     #[test]

@@ -243,10 +243,12 @@ impl BaseLegacy<'_> {
         };
 
         let erc_num_items = erc20.num_items()?;
+        let value_items = self.token_value_items();
 
         match item_n {
             x if (0..erc_num_items).contains(&x) => erc20.render_item(item_n, title, message, page),
-            x if x == erc_num_items => {
+            x if x < erc_num_items + value_items => self.render_token_value(title, message, page),
+            x if x == erc_num_items + value_items => {
                 let label = pic_str!(b"Contract");
                 title[..label.len()].copy_from_slice(label);
 
@@ -256,7 +258,7 @@ impl BaseLegacy<'_> {
                     .apdu_unwrap()
                     .render_eth_address(message, page)
             }
-            x if x == erc_num_items + 1 => {
+            x if x == erc_num_items + value_items + 1 => {
                 let label = pic_str!(b"Maximun Fee(GWEI)");
                 title[..label.len()].copy_from_slice(label);
 
@@ -281,12 +283,14 @@ impl BaseLegacy<'_> {
         };
 
         let erc_num_items = erc721.num_items()?;
+        let value_items = self.token_value_items();
 
         match item_n {
             x if (0..erc_num_items).contains(&x) => {
                 erc721.render_item(item_n, title, message, page)
             }
-            x if x == erc_num_items => {
+            x if x < erc_num_items + value_items => self.render_token_value(title, message, page),
+            x if x == erc_num_items + value_items => {
                 let label = pic_str!(b"Contract");
                 title[..label.len()].copy_from_slice(label);
 
@@ -296,7 +300,7 @@ impl BaseLegacy<'_> {
                     .apdu_unwrap()
                     .render_eth_address(message, page)
             }
-            x if x == erc_num_items + 1 => {
+            x if x == erc_num_items + value_items + 1 => {
                 let label = pic_str!(b"Maximun Fee(GWEI)");
                 title[..label.len()].copy_from_slice(label);
 
@@ -304,6 +308,29 @@ impl BaseLegacy<'_> {
             }
             _ => Err(ViewError::NoData),
         }
+    }
+
+    /// 1 when the transaction moves native value next to a token call, whose
+    /// view then carries an extra screen for it
+    fn token_value_items(&self) -> u8 {
+        !self.value.is_zero() as u8
+    }
+
+    /// The native value sent along with a token call
+    fn render_token_value(
+        &self,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
+        let label = pic_str!(b"Value");
+        title[..label.len()].copy_from_slice(label);
+
+        let curr = self.currency_prefix();
+        let (prefix, message) = message.split_at_mut(curr.len());
+        prefix.copy_from_slice(curr);
+
+        render_u256(&self.value, WEI_AVAX_DIGITS, message, page)
     }
 
     #[inline(never)]
@@ -402,12 +429,22 @@ impl DisplayableItem for BaseLegacy<'_> {
             EthData::AssetCall(d) => d.num_items()?.checked_add(1).ok_or(ViewError::Unknown)?,
             // description amount, address, fee and contract_data
             EthData::ContractCall(d) => d.num_items()?.checked_add(4).ok_or(ViewError::Unknown)?,
-            // address, fee
+            // address, fee, native value (if not zero)
             #[cfg(feature = "erc20")]
-            EthData::Erc20(d) => d.num_items()?.checked_add(2).ok_or(ViewError::Unknown)?,
-            // contract address, fee
+            EthData::Erc20(d) => checked_add!(
+                ViewError::Unknown,
+                2u8,
+                d.num_items()?,
+                self.token_value_items()
+            )?,
+            // contract address, fee, native value (if not zero)
             #[cfg(feature = "erc721")]
-            EthData::Erc721(d) => d.num_items()?.checked_add(2).ok_or(ViewError::Unknown)?,
+            EthData::Erc721(d) => checked_add!(
+                ViewError::Unknown,
+                2u8,
+                d.num_items()?,
+                self.token_value_items()
+            )?,
         };
 
         Ok(items)
