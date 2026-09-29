@@ -104,13 +104,13 @@ impl<W: DisplayableItem> DisplayableItem for Validator<'_, W> {
                 let label = pic_str!(b"Start time");
                 title[..label.len()].copy_from_slice(label);
                 let time =
-                    timestamp_to_str_date(self.start_time).map_err(|_| ViewError::Unknown)?;
+                    timestamp_to_str_date(self.start_time as u64).map_err(|_| ViewError::Unknown)?;
                 handle_ui_message(time.as_slice(), message, page)
             }
             2 => {
                 let label = pic_str!(b"End time");
                 title[..label.len()].copy_from_slice(label);
-                let time = timestamp_to_str_date(self.endtime).map_err(|_| ViewError::Unknown)?;
+                let time = timestamp_to_str_date(self.endtime as u64).map_err(|_| ViewError::Unknown)?;
                 handle_ui_message(time.as_slice(), message, page)
             }
             3 => self.weight.render_item(0, title, message, page),
