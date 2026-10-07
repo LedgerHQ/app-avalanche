@@ -49,15 +49,16 @@ pub struct ConvertSubnetToL1Tx<'b> {
 // description, chain_id, manager address, subnet_id, fee
 pub const BASE_FIELDS_LEN: u8 = 5;
 
-/// Node id, weight and balance: the fixed screens of each validator, ahead of
-/// its two owners.
-const VALIDATOR_FIXED_ITEMS: u8 = 3;
+/// Node id, weight, balance and BLS public key: the fixed screens of each
+/// validator, ahead of its two owners.
+const VALIDATOR_FIXED_ITEMS: u8 = 4;
 
 /// Screens contributed by one validator. They used to be the node id alone
 /// outside expert mode, but the balance is AVAX the user pays into the L1 and
 /// it is left out of the fee, so hiding it hid where that AVAX went. The
 /// owners decide who gets the balance back and who may disable the validator,
-/// so they are shown too.
+/// so they are shown too, as is the BLS public key the validator will sign
+/// warp messages with.
 fn validator_items(validator: &L1Validator) -> Result<u8, ViewError> {
     checked_add!(
         ViewError::Unknown,
@@ -159,6 +160,7 @@ impl<'b> ConvertSubnetToL1Tx<'b> {
                     .map_err(|_| ViewError::Unknown)?;
                 handle_ui_message(buf, message, page)
             }
+            3 => validator.signer.render_signer(title, message, page),
             x if x - VALIDATOR_FIXED_ITEMS < remaining_items => {
                 validator.remaining_balance_owner.render_item_with_label(
                     hrp,
@@ -465,6 +467,44 @@ mod tests {
                     );
                 }
             }
+        }
+        crate::utils::set_expert_for_test(true);
+    }
+
+    /// Each validator's BLS public key is the key it will sign warp messages
+    /// with on the new L1. It is fixed by this transaction, so it has to be
+    /// on screen in every mode, after the balance and ahead of the owners.
+    #[test]
+    fn convert_subnet_to_l1_shows_validator_bls_key() {
+        crate::utils::set_expert_for_test(false);
+
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/parser/testvectors/convert_subnet_to_l1_validators.json"
+        );
+        let data: Vec<u8> = serde_json::from_reader(std::fs::File::open(path).unwrap()).unwrap();
+
+        for data in [&data[2..], COMPLEX_CONVERT_SUBNET] {
+            let (_, tx) = ConvertSubnetToL1Tx::from_bytes(data).unwrap();
+            let shown = screens(&tx);
+
+            for validator in tx.validators.iter() {
+                let key = format!("0x{}", hex::encode(validator.signer.public_key()));
+                let at = shown
+                    .iter()
+                    .position(|s| *s == ("Signer".into(), key.clone()))
+                    .unwrap_or_else(|| panic!("BLS key {} not shown: {:#?}", key, shown));
+                assert_eq!(shown[at - 1].0, "Balance (AVAX)", "{:#?}", shown);
+            }
+
+            // a different key is a different review
+            let first = tx.validators.iter().next().unwrap();
+            let key = first.signer.public_key();
+            let at = data.windows(key.len()).position(|w| w == &key[..]).unwrap();
+            let mut tampered = data.to_vec();
+            tampered[at] ^= 0x01;
+            let (_, other) = ConvertSubnetToL1Tx::from_bytes(&tampered).unwrap();
+            assert_ne!(shown, screens(&other));
         }
         crate::utils::set_expert_for_test(true);
     }

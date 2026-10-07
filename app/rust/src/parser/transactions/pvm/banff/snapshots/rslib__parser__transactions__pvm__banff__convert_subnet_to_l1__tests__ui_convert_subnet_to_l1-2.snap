@@ -11,6 +11,7 @@ expression: reduced
     "Validator": "NodeID-2ZbTY9GatRTrfinAoYiYLcf6CvrPAUYgo",
     "Weight": "72623859790382856",
     "Balance (AVAX)": "1",
+    "Signer": "0xaff4acb4c5439b5d426cadf9e946d3a452f7de3414d1ad27336133211d8b90cf49fb97eebcdeeef714dc20f54ed0d4d1",
     "Rem Addr": "fuji1g32kvaugnx4tk3z4vemc3xd2hdz92enhfvw32u",
     "Disabler": "fuji1g32kvaugnx4tk3z4vemc3xd2hdz92enhfvw32u",
     "Amount": "0.000000001 AVAX to ",
