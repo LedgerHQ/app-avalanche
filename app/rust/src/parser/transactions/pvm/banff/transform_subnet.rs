@@ -31,8 +31,14 @@ use crate::{
         DisplayableItem, FromBytes, Header, ParserError, PvmOutput, SubnetAuth, SubnetId,
         DELEGATION_FEE_DIGITS, PVM_TRANSFORM_SUBNET, U64_FORMATTED_SIZE,
     },
-    utils::is_app_mode_expert,
 };
+
+/// avalanchego's reward.PercentDenominator: the delegation fee and the
+/// uptime requirement are in millionths, 1_000_000 being 100%.
+pub const PERCENT_DENOMINATOR: u64 = 1_000_000;
+
+/// The subnet parameters this transaction sets, shown after the fee.
+const PARAMETER_ITEMS: u8 = 12;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
@@ -168,7 +174,27 @@ impl TransformSubnetTx<'_> {
         Ok(fee)
     }
 
-    fn render_expert(
+    /// A value in millionths (PERCENT_DENOMINATOR) as a percentage with four
+    /// decimals, so every valid value is shown exactly.
+    fn render_percent(value: u64, message: &mut [u8], page: u8) -> Result<u8, ViewError> {
+        if value > PERCENT_DENOMINATOR {
+            return Err(ViewError::Unknown);
+        }
+        let value = u32::try_from(value).map_err(|_| ViewError::Unknown)?;
+
+        //+2 for 0. in case of decimals and +1 for %
+        let mut buffer = [0; U64_FORMATTED_SIZE + 2];
+        u32_to_str(value, &mut buffer[..]).map_err(|_| ViewError::Unknown)?;
+
+        let len = intstr_to_fpstr_inplace(&mut buffer[..], DELEGATION_FEE_DIGITS)
+            .map_err(|_| ViewError::Unknown)?
+            .len();
+        *buffer.get_mut(len).ok_or(ViewError::Unknown)? = b'%';
+
+        handle_ui_message(&buffer[..len + 1], message, page)
+    }
+
+    fn render_parameter(
         &self,
         item_n: u8,
         title: &mut [u8],
@@ -177,9 +203,7 @@ impl TransformSubnetTx<'_> {
     ) -> Result<u8, ViewError> {
         use itoa::Buffer;
 
-        //+2 for 0. in case of decimals and +1 for % in percentages
         let mut itoa_buffer = Buffer::new();
-        let mut buffer = [0; U64_FORMATTED_SIZE + 2];
 
         match item_n {
             0 => {
@@ -242,16 +266,7 @@ impl TransformSubnetTx<'_> {
                 let label = pic_str!(b"Min delegate fee");
                 title[..label.len()].copy_from_slice(label);
 
-                u32_to_str(self.min_delegation_fee, &mut buffer[..])
-                    .map_err(|_| ViewError::Unknown)?;
-
-                let len = intstr_to_fpstr_inplace(&mut buffer[..], DELEGATION_FEE_DIGITS)
-                    .map_err(|_| ViewError::Unknown)?
-                    .len();
-                buffer[len] = b'%';
-                let buffer = &mut buffer[..len + 1];
-
-                handle_ui_message(buffer, message, page)
+                Self::render_percent(self.min_delegation_fee.into(), message, page)
             }
             9 => {
                 let label = pic_str!(b"Min delega. stake");
@@ -272,17 +287,7 @@ impl TransformSubnetTx<'_> {
                 let label = pic_str!(b"Uptime req.");
                 title[..label.len()].copy_from_slice(label);
 
-                u32_to_str(self.uptime_requirement, &mut buffer[..])
-                    .map_err(|_| ViewError::Unknown)?;
-
-                //the uptime req% shares the same number of digits as the delegation fee% (4)
-                let len = intstr_to_fpstr_inplace(&mut buffer[..], DELEGATION_FEE_DIGITS)
-                    .map_err(|_| ViewError::Unknown)?
-                    .len();
-                buffer[len] = b'%';
-                let buffer = &mut buffer[..len + 1];
-
-                handle_ui_message(buffer, message, page)
+                Self::render_percent(self.uptime_requirement.into(), message, page)
             }
             _ => Err(ViewError::NoData),
         }
@@ -291,19 +296,13 @@ impl TransformSubnetTx<'_> {
 
 impl DisplayableItem for TransformSubnetTx<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        let num_expert_items = if is_app_mode_expert() {
-            // init/max supply + min/max consumption rate
-            // + min/max stake duration
-            // + min delegation fee + min delegator stake
-            // + max validator weight factor
-            // + uptime requirement
-            12
-        } else {
-            0
-        };
-
-        // tx info, subnet id, asset id, base outputs, fee
-        // + expert items.
+        // tx info, subnet id, asset id, base outputs, fee, then the subnet
+        // parameters: init/max supply, min/max consumption rate, min/max
+        // validator stake, min/max stake duration, min delegation fee, min
+        // delegator stake, max validator weight factor, uptime requirement.
+        // The parameters are what the transaction sets, so they are shown in
+        // every mode; they used to be expert-only, and a normal-mode review
+        // approved them unseen.
         // The base outputs were previously left out of the count entirely, so
         // where the transaction's change went was never on screen.
         checked_add!(
@@ -312,7 +311,7 @@ impl DisplayableItem for TransformSubnetTx<'_> {
             self.subnet_id.num_items()?,
             self.asset_id.num_items()?,
             self.base_tx.base_outputs_num_items()?,
-            num_expert_items
+            PARAMETER_ITEMS
         )
     }
 
@@ -323,10 +322,7 @@ impl DisplayableItem for TransformSubnetTx<'_> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
-        let expert = is_app_mode_expert();
-
         const START_OUTPUTS: u8 = 3;
-        const EXPERT_ITEMS: u8 = 12;
         let output_items = self.base_tx.base_outputs_num_items()?;
         let end_outputs = START_OUTPUTS
             .checked_add(output_items)
@@ -359,9 +355,9 @@ impl DisplayableItem for TransformSubnetTx<'_> {
                     nano_avax_to_fp_str(fee, &mut buffer[..]).map_err(|_| ViewError::Unknown)?;
                 handle_ui_message(fee_buff, message, page)
             }
-            // expert items follow the fee
-            x if expert && x > end_outputs && x - end_outputs <= EXPERT_ITEMS => {
-                self.render_expert(x - end_outputs - 1, title, message, page)
+            // the subnet parameters follow the fee
+            x if x > end_outputs && x - end_outputs <= PARAMETER_ITEMS => {
+                self.render_parameter(x - end_outputs - 1, title, message, page)
             }
             _ => Err(ViewError::NoData),
         }
@@ -450,6 +446,53 @@ mod tests {
 
             let reduced = pages.iter().map(ReducedPage::from).collect::<Vec<_>>();
             insta::assert_debug_snapshot!(reduced);
+        }
+    }
+
+    fn screens(tx: &TransformSubnetTx) -> Vec<String> {
+        (0..tx.num_items().unwrap())
+            .map(|i| {
+                let mut page = Page::<18, 1024>::default();
+                tx.render_item(i, &mut page.title, &mut page.message, 0)
+                    .unwrap();
+                format!("{:?}", ReducedPage::from(&page))
+            })
+            .collect()
+    }
+
+    /// The parameters are what TransformSubnet sets: a normal-mode review
+    /// used to approve them without showing any.
+    #[test]
+    fn transform_subnet_shows_its_parameters_in_normal_mode() {
+        use crate::utils::set_expert_for_test;
+
+        let (_, tx) = TransformSubnetTx::from_bytes(SIMPLE_TRANSFORM_SUBNET).unwrap();
+
+        set_expert_for_test(true);
+        let expert = screens(&tx);
+        set_expert_for_test(false);
+        let normal = screens(&tx);
+        set_expert_for_test(true);
+
+        assert_eq!(normal, expert);
+        for label in [
+            "Initial supply",
+            "Maximum supply",
+            "Min consumption",
+            "Max consumption",
+            "Min valid. stake",
+            "Max valid. stake",
+            "Min stake time",
+            "Max stake time",
+            "Min delegate fee",
+            "Min delega. stake",
+            "Max weight fact.",
+            "Uptime req.",
+        ] {
+            assert!(
+                normal.iter().any(|s| s.contains(&format!("\"{label}\""))),
+                "no {label} screen"
+            );
         }
     }
 }
