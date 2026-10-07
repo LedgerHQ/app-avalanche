@@ -212,7 +212,7 @@ void init_coin_config(chain_config_t *coin_config) {
  * @note This function sets the blockchain configuration on the first call and logs each operation.
  *       It includes extensive error handling to gracefully manage exceptions and reset the context as needed.
  */
-void handle_eth_apdu(uint32_t *flags, uint32_t *tx, __Z_UNUSED uint32_t rx, uint8_t *buffer, __Z_UNUSED uint16_t bufferLen) {
+void handle_eth_apdu(uint32_t *flags, uint32_t *tx, uint32_t rx, uint8_t *buffer, __Z_UNUSED uint16_t bufferLen) {
     uint16_t sw;
 
     // This is the best place to put this,
@@ -235,6 +235,11 @@ void handle_eth_apdu(uint32_t *flags, uint32_t *tx, __Z_UNUSED uint32_t rx, uint
 
     if (buffer[OFFSET_CLA] != CLA) {
         sw = SWO_INVALID_CLA;
+    } else if ((rx < OFFSET_CDATA) || ((rx - OFFSET_CDATA) != buffer[OFFSET_LC])) {
+        // The handlers trust lc, so it must match what was received; otherwise
+        // they read stale bytes from an earlier APDU. Upstream's apdu_parser()
+        // performs the same check in the main.c that avalanche replaces.
+        sw = SWO_WRONG_DATA_LENGTH;
     } else {
         const command_t cmd = {
             .cla = buffer[OFFSET_CLA],
