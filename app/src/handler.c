@@ -27,6 +27,7 @@
 // clang-format on
 
 #include "apdu_constants.h"
+#include "app_mode.h"
 #include "common_ui.h"
 #include "common_utils.h"
 #include "cx_errors.h"
@@ -168,25 +169,57 @@ const uint8_t *parseBip32(const uint8_t *dataBuffer, uint8_t *dataLength, bip32_
 }
 
 /**
- * Initialise app-ethereum's NVRAM settings.
+ * Read avalanche's blind-signing setting without side effects.
  *
- * Upstream does this in its own main.c, which avalanche replaces, so without
- * it every field reads as zero. That matters since the upstream bump: the
- * EIP-712 entry points now refuse to run unless N_storage.dataAllowed is set,
- * where previously they had no such gate. Avalanche exposes no app-ethereum
- * settings screen to turn it on, so enable it here to keep the pre-bump
- * behaviour of these APDUs.
+ * app_mode_blindsign() also arms zxlib's blind-signing review warning
+ * (blindsign_required) whenever the setting is on, which would make the next
+ * clear-signed avalanche review open with that warning. This is only a query,
+ * so put the flag back the way it was.
  */
-static void eth_storage_init(void) {
-    internalStorage_t storage;
+static bool avax_blind_signing_enabled(void) {
+    const bool warning_armed = app_mode_blindsign_required();
+    const bool enabled = app_mode_blindsign();
 
-    if (N_storage.initialized) {
+    if (!warning_armed) {
+        app_mode_skip_blindsign_ui();
+    }
+    return enabled;
+}
+
+/**
+ * Initialise app-ethereum's NVRAM settings and keep dataAllowed in step with
+ * avalanche's blind-signing setting.
+ *
+ * Upstream does the initialisation in its own main.c, which avalanche
+ * replaces, so without it every field reads as zero. Upstream gates EIP-712
+ * signing on N_storage.dataAllowed - its blind-signing setting: a v0 hashed
+ * message, and a v1 message reviewed without Ledger-signed filters, are
+ * refused unless it is set. Avalanche has no app-ethereum settings screen;
+ * its own blind-signing toggle (Nano menu, NBGL settings) is the one the user
+ * controls, and it already gates blind ETH transactions on the Rust side.
+ *
+ * Every read of dataAllowed happens while one of the APDUs routed through
+ * handle_eth_apdu() is processed, so mirroring the setting at the top of each
+ * of them keeps the two equal wherever app-ethereum looks, whenever the toggle
+ * was flipped. Both live in NVRAM, so they also survive a restart. The NVRAM
+ * write only happens when the value actually changes. The other fields keep
+ * their defaults (or what app-ethereum itself stored there).
+ */
+static void eth_storage_sync(void) {
+    bool data_allowed = avax_blind_signing_enabled();
+
+    if (!N_storage.initialized) {
+        internalStorage_t storage;
+
+        explicit_bzero(&storage, sizeof(storage));
+        storage.dataAllowed = data_allowed;
+        storage.initialized = true;
+        nvm_write((void *)&N_storage, (void *)&storage, sizeof(internalStorage_t));
         return;
     }
-    explicit_bzero(&storage, sizeof(storage));
-    storage.dataAllowed = true;
-    storage.initialized = true;
-    nvm_write((void *)&N_storage, (void *)&storage, sizeof(internalStorage_t));
+    if (N_storage.dataAllowed != data_allowed) {
+        nvm_write((void *)&N_storage.dataAllowed, (void *)&data_allowed, sizeof(data_allowed));
+    }
 }
 
 void init_coin_config(chain_config_t *coin_config) {
@@ -231,7 +264,7 @@ void handle_eth_apdu(uint32_t *flags, uint32_t *tx, uint32_t rx, uint8_t *buffer
             PRINTF("app-ethereum memory init failed\n");
         }
     }
-    eth_storage_init();
+    eth_storage_sync();
 
     if (buffer[OFFSET_CLA] != CLA) {
         sw = SWO_INVALID_CLA;
