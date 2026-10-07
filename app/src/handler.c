@@ -18,16 +18,26 @@
 #if defined(FEATURE_ETH)
 #include "handler.h"
 
+// Explicit path: avalanche has its own app/src/common/parser.h which would
+// otherwise shadow the SDK header defining command_t. It has to precede
+// apdu_constants.h, which uses that type, and the style merges include blocks
+// before sorting, so ordering is pinned explicitly here.
+// clang-format off
+#include "lib_standard_app/parser.h"
+// clang-format on
+
 #include "apdu_constants.h"
-#include "commands_712.h"
 #include "common_ui.h"
 #include "common_utils.h"
 #include "cx_errors.h"
+#include "eip712_v1_commands.h"
 #include "glyphs.h"
 #include "handle_check_address.h"
-#include "handle_swap_sign_transaction.h"
 #include "lib_standard_app/crypto_helpers.h"
+#include "manage_asset_info.h"
+#include "mem_utils.h"
 #include "shared_context.h"
+#include "status_words.h"
 
 uint32_t set_result_get_publicKey(void);
 void finalizeParsing(bool);
@@ -43,8 +53,8 @@ cx_sha3_t global_sha3;
 
 uint8_t appState;
 uint16_t apdu_response_code;
-bool G_called_from_swap;
-bool G_swap_response_ready;
+volatile bool G_called_from_swap;
+volatile bool G_swap_response_ready;
 pluginType_t pluginType;
 
 #ifdef HAVE_ETH2
@@ -61,7 +71,7 @@ const internalStorage_t N_storage_real;
 caller_app_t *caller_app = NULL;
 #endif
 
-const chain_config_t *chainConfig = NULL;
+const chain_config_t *g_chain_config = NULL;
 chain_config_t config;
 
 // This function is only present in master branch
@@ -94,7 +104,7 @@ void reset_app_context() {
     appState = APP_STATE_IDLE;
     G_called_from_swap = false;
     G_swap_response_ready = false;
-    pluginType = OLD_INTERNAL;
+    pluginType = PLUGIN_TYPE_OLD_INTERNAL;
 #ifdef HAVE_ETH2
     eth2WithdrawalIndex = 0;
 #endif
@@ -103,10 +113,14 @@ void reset_app_context() {
     memset((uint8_t *)&tmpContent, 0, sizeof(tmpContent));
 }
 
-void io_seproxyhal_send_status(uint32_t sw) {
-    G_io_apdu_buffer[0] = ((sw >> 8) & 0xff);
-    G_io_apdu_buffer[1] = (sw & 0xff);
-    io_exchange(CHANNEL_APDU | IO_RETURN_AFTER_TX, 2);
+uint16_t io_seproxyhal_send_status(uint16_t sw, uint32_t tx, bool reset, __Z_UNUSED bool idle) {
+    G_io_apdu_buffer[tx] = ((sw >> 8) & 0xff);
+    G_io_apdu_buffer[tx + 1] = (sw & 0xff);
+    if (reset) {
+        reset_app_context();
+    }
+    io_exchange(CHANNEL_APDU | IO_RETURN_AFTER_TX, tx + 2);
+    return sw;
 }
 
 // clang-format on
@@ -143,8 +157,9 @@ const uint8_t *parseBip32(const uint8_t *dataBuffer, uint8_t *dataLength, bip32_
 
 void init_coin_config(chain_config_t *coin_config) {
     memset(coin_config, 0, sizeof(chain_config_t));
-    strcpy(coin_config->coinName, CHAINID_COINNAME);
-    coin_config->chainId = CHAIN_ID;
+    strlcpy(coin_config->ticker, CHAINID_COINNAME, sizeof(coin_config->ticker));
+    coin_config->chain_id = CHAIN_ID;
+    coin_config->coin_type = BIP44_COIN_TYPE_3;
 }
 
 /**
@@ -163,103 +178,91 @@ void init_coin_config(chain_config_t *coin_config) {
  * @note This function sets the blockchain configuration on the first call and logs each operation.
  *       It includes extensive error handling to gracefully manage exceptions and reset the context as needed.
  */
-void handle_eth_apdu(__Z_UNUSED uint32_t *flags, uint32_t *tx, __Z_UNUSED uint32_t rx, uint8_t *buffer,
-                     __Z_UNUSED uint16_t bufferLen) {
-    unsigned short sw = 0;
+void handle_eth_apdu(uint32_t *flags, uint32_t *tx, __Z_UNUSED uint32_t rx, uint8_t *buffer, __Z_UNUSED uint16_t bufferLen) {
+    uint16_t sw;
 
     // This is the best place to put this,
     // and by checking to NULL we ensure that it is set once,
     // after the first call to this function
-    if (chainConfig == NULL) {
+    if (g_chain_config == NULL) {
         init_coin_config(&config);
-        chainConfig = &config;
+        g_chain_config = &config;
     }
 
-    BEGIN_TRY {
-        TRY {
-            if (buffer[OFFSET_CLA] != CLA) {
-                THROW(0x6E00);
-            }
+    if (buffer[OFFSET_CLA] != CLA) {
+        sw = SWO_INVALID_CLA;
+    } else {
+        const command_t cmd = {
+            .cla = buffer[OFFSET_CLA],
+            .ins = buffer[OFFSET_INS],
+            .p1 = buffer[OFFSET_P1],
+            .p2 = buffer[OFFSET_P2],
+            .lc = buffer[OFFSET_LC],
+            .data = buffer + OFFSET_CDATA,
+        };
 
-            switch (buffer[OFFSET_INS]) {
-                case INS_SIGN_EIP_712_MESSAGE:
-                    switch (buffer[OFFSET_P2]) {
-                        case P2_EIP712_LEGACY_IMPLEM:
-                            handleSignEIP712Message_v0(buffer[OFFSET_P1], buffer[OFFSET_P2], buffer + OFFSET_CDATA,
-                                                       buffer[OFFSET_LC], flags, tx);
-                            break;
+        switch (cmd.ins) {
+            case INS_SIGN_EIP_712_MESSAGE:
+                switch (cmd.p2) {
+                    case P2_EIP712_V0_IMPLEM:
+                        forget_known_assets();
+                        sw = handle_sign_eip712_message_v0(cmd.p1, cmd.data, cmd.lc);
+                        break;
 #ifdef HAVE_EIP712_FULL_SUPPORT
-                        case P2_EIP712_FULL_IMPLEM:
-                            *flags |= IO_ASYNCH_REPLY;
-                            handle_eip712_sign(buffer);
-                            break;
+                    case P2_EIP712_V1_IMPLEM:
+                        sw = handle_eip712_v1_sign(cmd.data, cmd.lc);
+                        break;
 #endif  // HAVE_EIP712_FULL_SUPPORT
-                        default:
-                            THROW(APDU_RESPONSE_INVALID_P1_P2);
-                    }
-                    break;
-
-#ifdef HAVE_EIP712_FULL_SUPPORT
-                case INS_EIP712_STRUCT_DEF:
-                    *flags |= IO_ASYNCH_REPLY;
-                    handle_eip712_struct_def(buffer);
-                    break;
-
-                case INS_EIP712_STRUCT_IMPL:
-                    *flags |= IO_ASYNCH_REPLY;
-                    handle_eip712_struct_impl(G_io_apdu_buffer);
-                    break;
-
-                case INS_EIP712_FILTERING:
-                    *flags |= IO_ASYNCH_REPLY;
-                    handle_eip712_filtering(buffer);
-                    break;
-#endif  // HAVE_EIP712_FULL_SUPPORT
-
-                default:
-                    THROW(0x6D00);
-                    break;
-            }
-        }
-        CATCH(EXCEPTION_IO_RESET) { THROW(EXCEPTION_IO_RESET); }
-        CATCH_OTHER(e) {
-            bool quit_now = G_called_from_swap && G_swap_response_ready;
-            switch (e & 0xF000) {
-                case 0x6000:
-                    // Wipe the transaction context and report the exception
-                    sw = e;
-                    reset_app_context();
-                    break;
-                case 0x9000:
-                    // All is well
-                    sw = e;
-                    break;
-                default:
-                    // Internal error
-                    sw = 0x6800 | (e & 0x7FF);
-                    reset_app_context();
-                    break;
-            }
-            // Unexpected exception => report
-            buffer[*tx] = sw >> 8;
-            buffer[*tx + 1] = sw;
-            *tx += 2;
-
-            // If we are in swap mode and have validated a TX, we send it and immediately quit
-            if (quit_now) {
-                if (io_exchange(CHANNEL_APDU | IO_RETURN_AFTER_TX, *tx) == 0) {
-                    // In case of success, the apdu is sent immediately and eth exits
-                    // Reaching this code means we encountered an error
-                    finalize_exchange_sign_transaction(false);
-                } else {
-                    PRINTF("Unrecoverable\n");
-                    os_sched_exit(-1);
+                    default:
+                        sw = SWO_WRONG_P1_P2;
+                        break;
                 }
-            }
+                break;
+
+#ifdef HAVE_EIP712_FULL_SUPPORT
+            case INS_EIP712_STRUCT_DEF:
+                sw = handle_eip712_v1_struct_def(cmd.p2, cmd.data, cmd.lc);
+                break;
+
+            case INS_EIP712_STRUCT_IMPL:
+                sw = handle_eip712_v1_struct_impl(cmd.p1, cmd.p2, cmd.data, cmd.lc);
+                break;
+
+            case INS_EIP712_FILTERING:
+                sw = handle_eip712_v1_filtering(cmd.p1, cmd.p2, cmd.data, cmd.lc);
+                // app-ethereum reports a refused filter, one not signed by
+                // Ledger's CAL key among them, as SWO_PARAMETER_ERROR_NO_INFO
+                // (0x6a00). Before the bump this app answered a filter whose
+                // signature does not verify with 0x6a80, which hosts already
+                // handle, so keep reporting that.
+                if (sw == SWO_PARAMETER_ERROR_NO_INFO) {
+                    sw = SWO_INCORRECT_DATA;
+                }
+                break;
+#endif  // HAVE_EIP712_FULL_SUPPORT
+
+            default:
+                sw = SWO_INVALID_INS;
+                break;
         }
-        FINALLY {}
     }
-    END_TRY;
+
+    // The handler has taken over the screen; the reply is sent once the user
+    // answers, so nothing is appended here.
+    if (sw == SWO_NO_RESPONSE) {
+        *flags |= IO_ASYNCH_REPLY;
+        return;
+    }
+
+    if (sw != SWO_SUCCESS) {
+        // Wipe the transaction context on any error, as the pre-bump
+        // CATCH_OTHER handler did.
+        reset_app_context();
+    }
+
+    buffer[*tx] = sw >> 8;
+    buffer[*tx + 1] = sw;
+    *tx += 2;
 }
 
 #endif
