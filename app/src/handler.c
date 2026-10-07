@@ -31,6 +31,7 @@
 #include "common_utils.h"
 #include "cx_errors.h"
 #include "eip712_v1_commands.h"
+#include "eip712_v1_context.h"
 #include "glyphs.h"
 #include "handle_check_address.h"
 #include "lib_standard_app/crypto_helpers.h"
@@ -38,6 +39,7 @@
 #include "mem_utils.h"
 #include "shared_context.h"
 #include "status_words.h"
+#include "ui_utils.h"
 
 uint32_t set_result_get_publicKey(void);
 void finalizeParsing(bool);
@@ -101,6 +103,16 @@ void format_signature_out(const uint8_t *signature) {
 }
 
 void reset_app_context() {
+    // Upstream moved the EIP-712 teardown into reset_app_context(): the
+    // approve/reject callbacks, the error paths and eip712_v1_context_init()
+    // all rely on it to free the typed-data context and the review buffers.
+    // Without it the context stays allocated after the first message, so every
+    // later EIP-712 request is refused until the app is restarted, and the
+    // heap leaks. All three are no-ops when nothing is allocated.
+    eip712_v1_context_deinit();
+    forget_known_assets();
+    ui_all_cleanup();
+
     appState = APP_STATE_IDLE;
     G_called_from_swap = false;
     G_swap_response_ready = false;
@@ -287,6 +299,11 @@ void handle_eth_apdu(uint32_t *flags, uint32_t *tx, __Z_UNUSED uint32_t rx, uint
     }
 
     if (sw != SWO_SUCCESS) {
+        // Upstream's dispatcher dismisses a review that is on screen before
+        // the reset frees the pairs it displays.
+        if (appState == APP_STATE_SIGNING_EIP712) {
+            ui_idle();
+        }
         // Wipe the transaction context on any error, as the pre-bump
         // CATCH_OTHER handler did.
         reset_app_context();
