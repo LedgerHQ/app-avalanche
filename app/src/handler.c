@@ -155,6 +155,28 @@ const uint8_t *parseBip32(const uint8_t *dataBuffer, uint8_t *dataLength, bip32_
     return dataBuffer;
 }
 
+/**
+ * Initialise app-ethereum's NVRAM settings.
+ *
+ * Upstream does this in its own main.c, which avalanche replaces, so without
+ * it every field reads as zero. That matters since the upstream bump: the
+ * EIP-712 entry points now refuse to run unless N_storage.dataAllowed is set,
+ * where previously they had no such gate. Avalanche exposes no app-ethereum
+ * settings screen to turn it on, so enable it here to keep the pre-bump
+ * behaviour of these APDUs.
+ */
+static void eth_storage_init(void) {
+    internalStorage_t storage;
+
+    if (N_storage.initialized) {
+        return;
+    }
+    explicit_bzero(&storage, sizeof(storage));
+    storage.dataAllowed = true;
+    storage.initialized = true;
+    nvm_write((void *)&N_storage, (void *)&storage, sizeof(internalStorage_t));
+}
+
 void init_coin_config(chain_config_t *coin_config) {
     memset(coin_config, 0, sizeof(chain_config_t));
     strlcpy(coin_config->ticker, CHAINID_COINNAME, sizeof(coin_config->ticker));
@@ -187,7 +209,17 @@ void handle_eth_apdu(uint32_t *flags, uint32_t *tx, __Z_UNUSED uint32_t rx, uint
     if (g_chain_config == NULL) {
         init_coin_config(&config);
         g_chain_config = &config;
+
+        // app-ethereum sets its dynamic allocator up in main.c, which
+        // avalanche replaces. The EIP-712 review allocates its tag/value pairs
+        // from that heap, so without this the first review runs against an
+        // uninitialised buffer. app_mem_init() resets the heap, so it must run
+        // exactly once - hence its place alongside the one-shot config setup.
+        if (!app_mem_init()) {
+            PRINTF("app-ethereum memory init failed\n");
+        }
     }
+    eth_storage_init();
 
     if (buffer[OFFSET_CLA] != CLA) {
         sw = SWO_INVALID_CLA;
