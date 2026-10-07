@@ -140,5 +140,7 @@ pub unsafe extern "C" fn _set_tx_hash(hash: *const u8, hash_len_bytes: u16) -> u
     // access to the path and hash resources that this handler just updated
     crate::lock_mut!(PATH).lock(SignHash);
     crate::lock_mut!(HASH).lock(SignHash);
+    // C calls this from the review's approve callback (app_sign)
+    crate::handlers::avax::sign_hash::mark_hash_approved();
     ZxError::Ok as u16
 }

@@ -267,3 +267,37 @@ describe.each(REJECTION_REGRESSION_MODELS)('signHash refused suffix [%s]', funct
     }
   })
 })
+
+describe.each(REJECTION_REGRESSION_MODELS)('signHash suffix during the review [%s]', function (m) {
+  // INS_SIGN_HASH stores the requested hash when FIRST_MESSAGE parses, so the
+  // review can show it. A suffix APDU sent while that review is still on screen
+  // used to be signed straight away. A client transport serialises requests,
+  // so the racing APDU goes to Speculos' REST API directly.
+  test('a hash is not signed before the user approves it', async function () {
+    const sim = new Zemu(m.path)
+    try {
+      await sim.start(defaultOptions(m))
+      const apduUrl = `http://127.0.0.1:${(sim as any).speculosApiPort}/apdu`
+      const sendRaw = (p1: number, data: Buffer): Promise<string> =>
+        fetch(apduUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ data: Buffer.concat([Buffer.from([0x80, 0x04, p1, 0x00, data.length]), data]).toString('hex') }),
+        })
+          .then(r => r.json())
+          .then(r => r.data as string)
+
+      const hash = Buffer.from(sha256('Unapproved Avalanche hash'), 'hex')
+      const review = sendRaw(0x01, Buffer.concat([signingRoot(), hash]))
+      await sim.waitUntilScreenIsNot(sim.getMainMenuSnapshot())
+
+      // nobody touched the device: no signature, only an error status
+      const suffixReply = await sendRaw(0x03, pathSuffix(0, 0))
+      expect(suffixReply).toEqual('6400')
+
+      await review
+    } finally {
+      await sim.close()
+    }
+  })
+})

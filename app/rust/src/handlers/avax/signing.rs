@@ -209,6 +209,7 @@ impl Viewable for SignUI {
             crate::lock_mut!(PATH).lock(SignHash);
             crate::lock_mut!(HASH).lock(SignHash);
         }
+        crate::handlers::avax::sign_hash::mark_hash_approved();
 
         (tx, Error::Success as _)
     }

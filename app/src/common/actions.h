@@ -159,6 +159,15 @@ __Z_INLINE void app_sign_msg() {
 __Z_INLINE void app_sign_hash_review() {
     zemu_log_stack("app_sign_hash_review");
 
+    // The hash was stored when the request was parsed, so the review could
+    // show it; only the user's approval here makes it signable.
+    if (_approve_sign_hash() != zxerr_ok) {
+        clean_up_hash_globals();
+        set_code(G_io_apdu_buffer, 0, APDU_CODE_EXECUTION_ERROR);
+        io_exchange(CHANNEL_APDU | IO_RETURN_AFTER_TX, 2);
+        return;
+    }
+
     // we are just returning the CODE_OK
     // the hash signature would be returned in the next stage.
     set_code(G_io_apdu_buffer, 0, APDU_CODE_OK);

@@ -51,6 +51,11 @@ pub mod resources {
     #[lazy_static]
     pub static mut HASH: Lock<Option<[u8; Sha256::DIGEST_LEN]>, HASHAccessors> = Lock::new(None);
 
+    /// Whether the user approved the hash now in HASH. See
+    /// `avax::sign_hash::mark_hash_approved`.
+    #[lazy_static]
+    pub static mut HASH_APPROVED: Lock<bool, HASHAccessors> = Lock::new(false);
+
     #[cfg(feature = "erc721")]
     #[lazy_static]
     pub static mut NFT_INFO: Lock<Option<crate::parser::NftInfo>, NFTInfoAccessors> =
