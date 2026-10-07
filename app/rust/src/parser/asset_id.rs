@@ -41,19 +41,29 @@ impl AssetId<'_> {
     /// Encode the id as CB58 (base58 with a 4-byte sha256 checksum), the
     /// form wallets and explorers show, into `out`. Returns the length.
     pub fn cb58_into(&self, out: &mut [u8; ASSET_ID_CB58_MAX_LEN]) -> Result<usize, ViewError> {
-        use bolos::hash::{Hasher, Sha256};
-
-        let mut data = [0; ASSET_ID_LEN + CB58_CHECKSUM_LEN];
-
-        data[..ASSET_ID_LEN].copy_from_slice(&self.0[..]);
-
-        let checksum = Sha256::digest(&data[..ASSET_ID_LEN]).map_err(|_| ViewError::Unknown)?;
-
-        // prepare the data to be encoded by appending last 4-byte
-        data[ASSET_ID_LEN..].copy_from_slice(&checksum[(Sha256::DIGEST_LEN - CB58_CHECKSUM_LEN)..]);
-
-        bs58_encode(data, &mut out[..]).map_err(|_| ViewError::Unknown)
+        cb58_encode_id(self.0, out)
     }
+}
+
+/// Encode a 32-byte id (asset id, transaction id) as CB58: base58 with a
+/// 4-byte sha256 checksum, the form wallets and explorers show. Returns the
+/// length written to `out`.
+pub fn cb58_encode_id(
+    id: &[u8; ASSET_ID_LEN],
+    out: &mut [u8; ASSET_ID_CB58_MAX_LEN],
+) -> Result<usize, ViewError> {
+    use bolos::hash::{Hasher, Sha256};
+
+    let mut data = [0; ASSET_ID_LEN + CB58_CHECKSUM_LEN];
+
+    data[..ASSET_ID_LEN].copy_from_slice(&id[..]);
+
+    let checksum = Sha256::digest(&data[..ASSET_ID_LEN]).map_err(|_| ViewError::Unknown)?;
+
+    // prepare the data to be encoded by appending last 4-byte
+    data[ASSET_ID_LEN..].copy_from_slice(&checksum[(Sha256::DIGEST_LEN - CB58_CHECKSUM_LEN)..]);
+
+    bs58_encode(data, &mut out[..]).map_err(|_| ViewError::Unknown)
 }
 
 impl<'b> AssetId<'b> {
