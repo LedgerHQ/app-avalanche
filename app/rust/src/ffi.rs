@@ -52,13 +52,55 @@ const _: () = assert!(
 /// approve screen can never be reached.
 const MAX_REVIEW_ITEMS: u8 = u8::MAX - 1;
 
+// `bolos::lazy_static` expands into the legacy `static mut` access pattern;
+// the allow is scoped to the module the macro writes into.
+#[allow(static_mut_refs)]
+mod parsed_storage {
+    use super::context::Instruction;
+    use bolos::pic::PIC;
+
+    /// What the last parse completed into `parser_buffer`: set only once a
+    /// parse has fully succeeded, cleared before anything writes that buffer
+    /// or the request bytes the object borrows. See `parsed_as`.
+    #[bolos::lazy_static]
+    pub(super) static mut PARSED: Option<Instruction> = None;
+}
+
+fn parsed() -> &'static mut Option<Instruction> {
+    unsafe { crate::lock_mut!(parsed_storage::PARSED) }
+}
+
+/// Whether `parser_buffer` holds an object of `kind` that a parse completed.
+///
+/// A parse writes the object in place, so one that fails half way leaves a
+/// partly built object behind (or a zeroed buffer, which C clears before
+/// every parse). The review of the previous request is still on screen at
+/// that point and keeps rendering, and reading that buffer as a `T` through
+/// `assume_init_*` would follow null or dangling references. Every reader
+/// of the buffer checks this first.
+fn parsed_as(kind: Instruction) -> bool {
+    *parsed() == Some(kind)
+}
+
+/// Forget the parsed object. Called at the start of every parse and when a
+/// new request resets the bytes the object borrows.
+pub(crate) fn forget_parsed() {
+    *parsed() = None;
+}
+
+/// Forget the parsed object and return what it was.
+pub(crate) fn take_parsed() -> Option<Instruction> {
+    parsed().take()
+}
+
 /// Returns the buffer `tx_obj.state` points to as a `T`, provided it is not
 /// null and is large enough and aligned for a `T`.
 ///
 /// # Safety
 ///
 /// `ctx` must be valid, and a non-null `tx_obj.state` must point to
-/// `tx_obj.len` writable bytes that nothing else references.
+/// `tx_obj.len` writable bytes that nothing else references. Before reading
+/// it as an initialized `T`, the caller checks `parsed_as` for that `T`.
 unsafe fn state_as<'a, T>(
     ctx: *const parser_context_t,
 ) -> Result<&'a mut MaybeUninit<T>, ParserError> {
@@ -111,6 +153,9 @@ pub unsafe extern "C" fn _parser_init(
     len: usize,
     alloc_size: *mut u32,
 ) -> u32 {
+    // C clears `parser_buffer` right after this returns
+    forget_parsed();
+
     if ctx.is_null() || alloc_size.is_null() {
         return ParserError::ParserInitContextEmpty as u32;
     }
@@ -191,6 +236,9 @@ unsafe fn parser_init_context(
 /// * Parsing the transaction type or specific transaction components fails.
 #[no_mangle]
 pub unsafe extern "C" fn _parser_read(ctx: *const parser_context_t) -> u32 {
+    // Set again below only once the whole parse has succeeded
+    forget_parsed();
+
     if ctx.is_null() {
         return ParserError::ParserContextMismatch as u32;
     };
@@ -227,6 +275,7 @@ pub unsafe extern "C" fn _parser_read(ctx: *const parser_context_t) -> u32 {
                         return ParserError::InvalidPath as u32;
                     };
 
+                    *parsed() = Some(Instruction::SignAvaxTx);
                     ParserError::ParserOk as u32
                 }
                 Err(e) => e as u32,
@@ -237,6 +286,7 @@ pub unsafe extern "C" fn _parser_read(ctx: *const parser_context_t) -> u32 {
             if let Err(e) = SignHash::parse_hash(data) {
                 return e as u32;
             }
+            *parsed() = Some(Instruction::SignAvaxHash);
             ParserError::ParserOk as u32
         }
 
@@ -246,7 +296,10 @@ pub unsafe extern "C" fn _parser_read(ctx: *const parser_context_t) -> u32 {
                 Err(e) => return e as u32,
             };
             match AvaxMessage::from_bytes_into(data, tx) {
-                Ok(_) => ParserError::ParserOk as u32,
+                Ok(_) => {
+                    *parsed() = Some(Instruction::SignAvaxMsg);
+                    ParserError::ParserOk as u32
+                }
                 Err(_) => ParserError::InvalidAvaxMessage as u32,
             }
         }
@@ -286,6 +339,11 @@ unsafe fn num_items_avax(ctx: *const parser_context_t, num_items: &mut u8) -> u3
     let Ok(tx_type) = Instruction::try_from((*ctx).ins) else {
         return ParserError::InvalidTransactionType as u32;
     };
+
+    // Only an object a parse completed is read, never a half-built one
+    if !parsed_as(tx_type) {
+        return ParserError::ParserContextMismatch as u32;
+    }
 
     match tx_type {
         Instruction::SignAvaxTx => {
@@ -398,6 +456,12 @@ unsafe fn get_avax_item(
     let Ok(tx_type) = Instruction::try_from((*ctx).ins) else {
         return ParserError::InvalidTransactionType as u32;
     };
+
+    // Only an object a parse completed is read, never a half-built one. Not
+    // NoData: tx_getItem would turn that into the end of the review.
+    if !parsed_as(tx_type) {
+        return ParserError::ParserContextMismatch as u32;
+    }
 
     match tx_type {
         Instruction::SignAvaxTx => {
@@ -661,6 +725,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(miri), file_serial(path))]
     fn avax_msg_is_parsed_into_state_buffer() {
         assert_parsed_into_state(
             Instruction::SignAvaxMsg,
@@ -670,6 +735,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(miri), file_serial(path))]
     fn avax_msg_review_shows_the_whole_message() {
         let text: Vec<u8> = (0..350).map(|i| b'a' + (i % 26) as u8).collect();
         let mut data = b"\x1AAvalanche Signed Message:\n".to_vec();
@@ -870,6 +936,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(miri), file_serial(path))]
     fn render_errors_are_not_reported_as_ok() {
         let data = avax_msg_data();
         let mut state = StateBuffer([0; STATE_SIZE]);
@@ -902,6 +969,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(miri), file_serial(path))]
     fn get_item_checks_out_pointers() {
         use core::ptr::{null, null_mut};
 
@@ -952,6 +1020,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(miri), file_serial(path))]
     fn state_buffer_is_checked() {
         let data = avax_msg_data();
         let len = size_of::<AvaxMessage>();
@@ -1041,5 +1110,205 @@ mod tests {
                 "{items} items"
             );
         }
+    }
+
+    fn num_items_err(ctx: *const parser_context_t) -> u32 {
+        let mut num_items = 0u8;
+        unsafe { _getNumItems(ctx, &mut num_items) }
+    }
+
+    fn item_err(ctx: *const parser_context_t, idx: u8) -> u32 {
+        let mut key = [0i8; 40];
+        let mut value = [0i8; 40];
+        let mut page_count = 0u8;
+        unsafe {
+            _getItem(
+                ctx,
+                idx,
+                key.as_mut_ptr(),
+                key.len() as u16,
+                value.as_mut_ptr(),
+                value.len() as u16,
+                0,
+                &mut page_count,
+            )
+        }
+    }
+
+    /// Neither getter reads the state buffer. Both fail, and not with NoData,
+    /// which tx_getItem turns into the end of the review.
+    fn assert_not_rendered(ctx: *const parser_context_t) {
+        assert_eq!(
+            num_items_err(ctx),
+            ParserError::ParserContextMismatch as u32
+        );
+        assert_eq!(item_err(ctx, 0), ParserError::ParserContextMismatch as u32);
+    }
+
+    // Safety review #10: a second request that fails to parse leaves a
+    // partly built transaction in the buffer the open review renders from.
+    // The review must stop rendering it instead of reading it as complete.
+    #[test]
+    #[cfg_attr(not(miri), file_serial(path))]
+    fn failed_reparse_of_a_tx_is_not_rendered() {
+        set_avax_root_path();
+        let good = avax_tx_data();
+        // the same transaction cut short: it fails half way through
+        let bad = good[..good.len() - 40].to_vec();
+
+        let mut state = StateBuffer([0; STATE_SIZE]);
+        let mut guarded = GuardedCtx::new(
+            Instruction::SignAvaxTx,
+            &good,
+            &mut state,
+            size_of::<Transaction>(),
+        );
+        let ctx: *mut parser_context_t = &mut guarded.ctx;
+        assert_eq!(unsafe { _parser_read(ctx) }, ParserError::ParserOk as u32);
+        render_all(ctx);
+
+        // the next request is parsed into the same buffer, and fails
+        unsafe {
+            (*ctx).buffer = bad.as_ptr();
+            (*ctx).buffer_len = bad.len() as u16;
+        }
+        assert_ne!(unsafe { _parser_read(ctx) }, ParserError::ParserOk as u32);
+        assert_not_rendered(ctx);
+
+        // a good one is rendered again
+        unsafe {
+            (*ctx).buffer = good.as_ptr();
+            (*ctx).buffer_len = good.len() as u16;
+        }
+        assert_eq!(unsafe { _parser_read(ctx) }, ParserError::ParserOk as u32);
+        render_all(ctx);
+    }
+
+    // The C side of the same: `_parser_init`, then C zeroes the buffer, then
+    // the parse fails. The zeroed object is not read either.
+    #[test]
+    #[cfg_attr(not(miri), file_serial(path))]
+    fn zeroed_state_of_a_failed_parse_is_not_rendered() {
+        let good = avax_msg_data();
+        let mut bad = good.clone();
+        bad[1] ^= 0xff; // not the AVAX message header
+
+        let mut state = StateBuffer([0; STATE_SIZE]);
+        let state_ptr = state.0.as_mut_ptr();
+        let mut guarded = GuardedCtx::new(
+            Instruction::SignAvaxMsg,
+            &good,
+            &mut state,
+            size_of::<AvaxMessage>(),
+        );
+        let ctx: *mut parser_context_t = &mut guarded.ctx;
+        assert_eq!(unsafe { _parser_read(ctx) }, ParserError::ParserOk as u32);
+        render_all(ctx);
+
+        let mut size = 0u32;
+        assert_eq!(
+            unsafe { _parser_init(ctx, bad.as_ptr(), bad.len(), &mut size) },
+            ParserError::ParserOk as u32
+        );
+        // parser_allocate
+        unsafe { core::ptr::write_bytes(state_ptr, 0, STATE_SIZE) };
+        assert_not_rendered(ctx);
+
+        assert_eq!(
+            unsafe { _parser_read(ctx) },
+            ParserError::InvalidAvaxMessage as u32
+        );
+        assert_not_rendered(ctx);
+    }
+
+    // An object parsed as one kind is never read as another.
+    #[test]
+    #[cfg_attr(not(miri), file_serial(path))]
+    fn parsed_object_is_read_as_its_own_kind_only() {
+        let data = avax_msg_data();
+        let mut state = StateBuffer([0; STATE_SIZE]);
+        let mut guarded = GuardedCtx::new(
+            Instruction::SignAvaxMsg,
+            &data,
+            &mut state,
+            size_of::<Transaction>(),
+        );
+        let ctx: *mut parser_context_t = &mut guarded.ctx;
+        assert_eq!(unsafe { _parser_read(ctx) }, ParserError::ParserOk as u32);
+
+        unsafe { (*ctx).ins = Instruction::SignAvaxTx as u8 };
+        assert_not_rendered(ctx);
+
+        unsafe { (*ctx).ins = Instruction::SignAvaxMsg as u8 };
+        render_all(ctx);
+    }
+
+    // P1_INIT of a new request resets the bytes the parsed object borrows,
+    // before anything is parsed again.
+    #[test]
+    #[cfg_attr(not(miri), file_serial(path))]
+    fn new_request_stops_the_parsed_object_being_read() {
+        set_avax_root_path();
+        let data = avax_tx_data();
+        let mut state = StateBuffer([0; STATE_SIZE]);
+        let guarded = GuardedCtx::new(
+            Instruction::SignAvaxTx,
+            &data,
+            &mut state,
+            size_of::<Transaction>(),
+        );
+        assert_eq!(
+            unsafe { _parser_read(&guarded.ctx) },
+            ParserError::ParserOk as u32
+        );
+        render_all(&guarded.ctx);
+
+        // even with a root path that is refused
+        let bad_path = [1u8, 0, 0, 0, 0];
+        assert_ne!(
+            unsafe { _set_root_path(bad_path.as_ptr(), bad_path.len() as u16) },
+            ParserError::ParserOk as u32
+        );
+        assert_not_rendered(&guarded.ctx);
+    }
+
+    // Approval signs nothing unless a parse completed, and only once.
+    #[test]
+    #[cfg_attr(not(miri), file_serial(path))]
+    fn approval_needs_a_completed_parse() {
+        use super::context::_set_tx_hash;
+        use super::sign_hash::_clean_up_hash;
+
+        let hash = [0x42u8; 32];
+        let approve = || unsafe { _set_tx_hash(hash.as_ptr(), hash.len() as u16) };
+        let read = |data: &[u8]| {
+            let mut state = StateBuffer([0; STATE_SIZE]);
+            let guarded = GuardedCtx::new(
+                Instruction::SignAvaxMsg,
+                data,
+                &mut state,
+                size_of::<AvaxMessage>(),
+            );
+            unsafe { _parser_read(&guarded.ctx) }
+        };
+
+        unsafe { _clean_up_hash() };
+        set_avax_root_path();
+        let good = avax_msg_data();
+        let mut bad = good.clone();
+        bad[1] ^= 0xff;
+
+        // a failed parse
+        assert_eq!(read(&good), ParserError::ParserOk as u32);
+        assert_ne!(read(&bad), ParserError::ParserOk as u32);
+        assert_ne!(approve(), ZxError::Ok as u16);
+
+        // a completed one, approved once
+        set_avax_root_path();
+        assert_eq!(read(&good), ParserError::ParserOk as u32);
+        assert_eq!(approve(), ZxError::Ok as u16);
+        assert_ne!(approve(), ZxError::Ok as u16);
+
+        unsafe { _clean_up_hash() };
     }
 }

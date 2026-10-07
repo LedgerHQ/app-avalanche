@@ -63,6 +63,8 @@ pub struct parse_tx_t {
 //     EthAddr,
 // } instruction_t;
 #[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
 pub enum Instruction {
     SignAvaxTx = 0x00,
     SignEthTx,
@@ -99,6 +101,11 @@ impl TryFrom<u8> for Instruction {
 
 #[no_mangle]
 pub unsafe extern "C" fn _set_root_path(raw_path: *const u8, path_len_bytes: u16) -> u32 {
+    // This is P1_INIT of a new request, and C has just reset the buffer the
+    // parsed object borrows from: whatever review is still on screen must
+    // not re-read it, valid path or not.
+    super::forget_parsed();
+
     let path = core::slice::from_raw_parts(raw_path, path_len_bytes as usize);
     // read root path and store it in ram as during the
     // signing process and diseabling outputs we use it
@@ -123,6 +130,17 @@ pub unsafe extern "C" fn _set_root_path(raw_path: *const u8, path_len_bytes: u16
 
 #[no_mangle]
 pub unsafe extern "C" fn _set_tx_hash(hash: *const u8, hash_len_bytes: u16) -> u16 {
+    // This is the approval of an AVAX transaction or message review. It
+    // answers that review whatever happens next, so the parsed object is
+    // forgotten here, and there has to be one: approving a review whose
+    // object a later request failed to replace must not sign anything.
+    if !matches!(
+        super::take_parsed(),
+        Some(Instruction::SignAvaxTx | Instruction::SignAvaxMsg)
+    ) {
+        return ZxError::NoData as u16;
+    }
+
     if hash_len_bytes != Sign::SIGN_HASH_SIZE as u16 {
         return ZxError::OutOfBounds as u16;
     }
