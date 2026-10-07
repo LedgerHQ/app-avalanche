@@ -27,7 +27,6 @@ use crate::{
         Address, AssetId, DisplayableItem, FromBytes, NftInfo, ParserError, ADDRESS_LEN,
         ETH_ARG_LEN,
     },
-    utils::ApduPanic,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,6 +39,17 @@ impl ERC721Info {
             Ok(Some(some)) => Ok(some),
             _ => Err(ParserError::NftInfoNotProvided),
         }
+    }
+
+    /// The NFT info a review renders from.
+    ///
+    /// The parse checked it was there, but the review keeps reading it at
+    /// every screen, while requests that arrive during the review can
+    /// re-lock or clear the slot (INS_PROVIDE_NFT_INFORMATION, or an ETH
+    /// request that resets the ETH state). That fails the render with an
+    /// error the review shows, instead of aborting the device.
+    fn nft_info_for_render() -> Result<&'static NftInfo, ViewError> {
+        Self::get_nft_info().map_err(|_| ViewError::Unknown)
     }
 
     #[cfg(test)]
@@ -72,8 +82,7 @@ impl DisplayableItem for BaseTransfer<'_> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
-        // valid as at this point it was checked
-        let nft_info = ERC721Info::get_nft_info().apdu_unwrap();
+        let nft_info = ERC721Info::nft_info_for_render()?;
 
         match item_n {
             0 => {
@@ -504,8 +513,7 @@ impl<'b> ERC721<'b> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
-        // this wont panic as it was checked at parsing
-        let nft_info = ERC721Info::get_nft_info().apdu_unwrap();
+        let nft_info = ERC721Info::nft_info_for_render()?;
 
         match item_n {
             0 => {
@@ -539,8 +547,7 @@ impl<'b> ERC721<'b> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
-        // valid as at this point it was checked
-        let nft_info = ERC721Info::get_nft_info().apdu_unwrap();
+        let nft_info = ERC721Info::nft_info_for_render()?;
 
         match item_n {
             0 => {

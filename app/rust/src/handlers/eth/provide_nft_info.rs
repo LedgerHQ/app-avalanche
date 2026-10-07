@@ -21,9 +21,17 @@ pub struct Info;
 impl Info {
     pub fn process(input: &[u8]) -> Result<(), Error> {
         crate::zlog("NftInfo::process\x00");
-        // skip type and version
-        let mut nft_info = core::mem::MaybeUninit::uninit();
 
+        // A parsed transaction holds the info from its parse until its
+        // review is answered, and the ERC-721 review reads the collection
+        // name from it at every screen. Taking the slot from under it would
+        // make the rest of that review fail to render, and replacing it
+        // would change the name it shows, so the info stays untouched.
+        if Self::held_by_review() {
+            return Err(Error::ApduCodeConditionsNotSatisfied);
+        }
+
+        let mut nft_info = core::mem::MaybeUninit::uninit();
         _ = crate::parser::FromBytes::from_bytes_into(input, &mut nft_info)
             .map_err(|_| Error::DataInvalid)?;
 
@@ -40,6 +48,15 @@ impl Info {
         }
 
         Ok(())
+    }
+
+    /// Whether a parsed ETH transaction holds NFT info for its review.
+    /// Looking does not change who holds it.
+    fn held_by_review() -> bool {
+        use crate::handlers::resources::NFT_INFO;
+        use crate::parser::ERC721Info;
+
+        unsafe { matches!(crate::lock_mut!(NFT_INFO).acquire(ERC721Info), Ok(Some(_))) }
     }
 }
 

@@ -1321,23 +1321,20 @@ mod session_tests {
         reset();
     }
 
-    // AVAX-17: NFT info serves the one request it was provided for; a later
-    // request must not pick it up.
-    #[test]
+    /// An NFT info descriptor for Smol Joes, and an ERC-721
+    /// transferFrom(0xc3.., 0xb2.., 1) on that collection
     #[cfg(feature = "erc721")]
-    #[file_serial(path)]
-    fn nft_info_is_claimed_by_one_request() {
-        use crate::handlers::eth::provide_nft_info::Info;
-
-        reset();
-
-        const NFT: [u8; 20] = [0xa1; 20];
-        let mut descriptor = std::vec![1u8, 1, 4];
-        descriptor.extend_from_slice(b"Test");
+    fn smol_joes_transfer() -> (Vec<u8>, Vec<u8>) {
+        const NFT: [u8; 20] = [
+            0xc7, 0x0d, 0xf8, 0x7e, 0x1d, 0x98, 0xf6, 0xa5, 0x31, 0xc8, 0xe3, 0x24, 0xc9, 0xbc,
+            0xec, 0x6f, 0xc8, 0x2b, 0x5e, 0x8d,
+        ];
+        // type 1, version 1, name, contract, chain id
+        let mut descriptor = std::vec![1u8, 1, 9];
+        descriptor.extend_from_slice(b"Smol Joes");
         descriptor.extend_from_slice(&NFT);
         descriptor.extend_from_slice(&AVAX_C_CHAIN_MAINNET_ID.to_be_bytes());
 
-        // transferFrom(0xc3.., 0xb2.., 1)
         let mut data = hex::decode("23b872dd").unwrap();
         data.extend_from_slice(&[0; 12]);
         data.extend_from_slice(&[0xc3; 20]);
@@ -1360,17 +1357,43 @@ mod session_tests {
             list(&[]),
         ]));
 
-        let rendered = || {
-            let ui = unsafe { crate::lock_mut!(ETH_UI).lock(EthAccessors::Tx) };
-            let ui = ui.as_mut().expect("no review stored");
-            let mut shown = std::string::String::new();
-            for i in 0..ui.num_items().unwrap() {
+        (descriptor, nft_tx)
+    }
+
+    /// Render the first page of every item of the stored review, as the
+    /// device would, keeping each result
+    fn render_each_item() -> Vec<Result<std::string::String, ViewError>> {
+        let ui = unsafe { crate::lock_mut!(ETH_UI).lock(EthAccessors::Tx) };
+        let ui = ui.as_mut().expect("no review stored");
+        (0..ui.num_items().unwrap())
+            .map(|i| {
                 let (mut title, mut msg) = ([0u8; 64], [0u8; 256]);
-                ui.render_item(i, &mut title, &mut msg, 0).unwrap();
-                shown.push_str(std::str::from_utf8(&title).unwrap());
-                shown.push_str(std::str::from_utf8(&msg).unwrap());
-            }
-            shown
+                ui.render_item(i, &mut title, &mut msg, 0).map(|_| {
+                    let mut shown = std::string::String::from_utf8_lossy(&title).into_owned();
+                    shown.push_str(&std::string::String::from_utf8_lossy(&msg));
+                    shown
+                })
+            })
+            .collect()
+    }
+
+    // AVAX-17: NFT info serves the one request it was provided for; a later
+    // request must not pick it up.
+    #[test]
+    #[cfg(feature = "erc721")]
+    #[file_serial(path)]
+    fn nft_info_is_claimed_by_one_request() {
+        use crate::handlers::eth::provide_nft_info::Info;
+
+        reset();
+
+        let (descriptor, nft_tx) = smol_joes_transfer();
+
+        let rendered = || {
+            render_each_item()
+                .into_iter()
+                .map(Result::unwrap)
+                .collect::<std::string::String>()
         };
 
         // provided right before: the request uses it
@@ -1387,6 +1410,85 @@ mod session_tests {
         // the next request was not given NFT info
         assert_eq!(send_tx(&nft_tx), Ok(true));
         assert!(!rendered().contains("ERC-721"), "stale NFT info used");
+        reset();
+    }
+
+    // Safety review #5: the ERC-721 review reads the NFT info at every
+    // screen. Losing it mid-review, to a re-lock or a cleanup by a request
+    // sent meanwhile, fails those screens instead of aborting the device.
+    #[test]
+    #[cfg(feature = "erc721")]
+    #[file_serial(path)]
+    fn erc721_review_survives_losing_nft_info() {
+        use crate::handlers::eth::provide_nft_info::Info;
+        use crate::handlers::resources::NFT_INFO;
+
+        let (descriptor, nft_tx) = smol_joes_transfer();
+        let lose_info: [(&str, fn()); 2] = [
+            ("re-locked by the provider", || unsafe {
+                crate::lock_mut!(NFT_INFO).lock(Info);
+            }),
+            ("cleared by an ETH request", || unsafe {
+                crate::lock_mut!(NFT_INFO).lock(Sign).take();
+            }),
+        ];
+
+        for (how, lose) in lose_info {
+            reset();
+            Info::process(&descriptor).unwrap();
+            assert_eq!(send_tx(&nft_tx), Ok(true));
+            let before = render_each_item();
+            assert!(before.iter().all(Result::is_ok), "{how}");
+            assert!(before.iter().flatten().any(|p| p.contains("Smol Joes")));
+
+            lose();
+            let after = render_each_item();
+            // the screens that show NFT info now fail; the others still render
+            assert!(after.iter().any(Result::is_err), "{how}: {after:?}");
+            assert!(after.iter().any(Result::is_ok), "{how}");
+            assert!(
+                !after.iter().flatten().any(|p| p.contains("Smol Joes")),
+                "{how}"
+            );
+        }
+        reset();
+    }
+
+    // Safety review #5: NFT info cannot be replaced while a review holds it,
+    // and can be once that review is answered.
+    #[test]
+    #[cfg(feature = "erc721")]
+    #[file_serial(path)]
+    fn nft_info_held_by_a_review_is_not_replaced() {
+        use crate::handlers::eth::provide_nft_info::Info;
+
+        reset();
+        let (descriptor, nft_tx) = smol_joes_transfer();
+        Info::process(&descriptor).unwrap();
+        assert_eq!(send_tx(&nft_tx), Ok(true));
+        let before = render_each_item();
+
+        assert_eq!(
+            Info::process(&descriptor),
+            Err(Error::ApduCodeConditionsNotSatisfied)
+        );
+        // a refused descriptor would otherwise drop the stored info too
+        let mut forged = descriptor.clone();
+        forged[3] = b'B';
+        assert_eq!(
+            Info::process(&forged),
+            Err(Error::ApduCodeConditionsNotSatisfied)
+        );
+        assert_eq!(render_each_item(), before);
+
+        // answered (rejected): the next request may provide again
+        unsafe { crate::ffi::sign_hash::_clean_up_eth() };
+        assert_eq!(Info::process(&descriptor), Ok(()));
+        reset();
+
+        // a review that holds no NFT info does not block the provider
+        assert_eq!(send_tx(&eip1559(AVAX_C_CHAIN_MAINNET_ID, 10)), Ok(true));
+        assert_eq!(Info::process(&descriptor), Ok(()));
         reset();
     }
 
