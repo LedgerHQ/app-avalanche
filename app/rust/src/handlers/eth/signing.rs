@@ -81,6 +81,28 @@ fn checked_chain_id(id: &[u8], legacy: bool) -> Result<[u8; 8], ParserError> {
     chain_id_to_array(id).ok_or(ParserError::InvalidChainId)
 }
 
+/// Refuse to review a parsed transaction that may only be blind signed while
+/// the blind-signing setting is off.
+///
+/// That is a transaction on a foreign EVM chain, whose native ticker the
+/// device cannot resolve (the value would render as "???"), and one whose
+/// data is not decoded in full (a contract deployment or a call to a method
+/// the app does not know), whose review only shows a short preview of the
+/// bytes it signs. A streamed transaction is never parsed and gates on the
+/// setting on its own path, with the same error.
+///
+/// The setting is only read for these transactions: on the device, reading it
+/// while it is on is what makes the review open with the blind-signing
+/// warning, so a clear-signed review must not read it.
+fn check_blind_signing(tx: &EthTransaction) -> Result<(), ParserError> {
+    let blind = !is_avax_chain_bytes(tx.chain_id()) || tx.requires_blind_signing();
+    if blind && !is_app_mode_blind_sign() {
+        return Err(ParserError::BlindSignNotEnabled);
+    }
+
+    Ok(())
+}
+
 /// Next RLP string in `data`: a list where a field is expected is refused
 fn rlp_string(data: &[u8]) -> Result<(&[u8], &[u8]), ParserError> {
     if *data.first().ok_or(ParserError::UnexpectedBufferEnd)? >= 0xC0 {
@@ -250,14 +272,8 @@ impl Sign {
         let unsigned_hash = Self::digest(txdata).map_err(|_| Error::DataInvalid)?;
         let tx = unsafe { tx.assume_init() };
 
-        // Foreign EVM chain (not AVAX C-Chain): the device cannot resolve the
-        // native ticker symbol — the value field would render as "???" — so
-        // require blind-sign mode here, matching upstream Ledger Ethereum app
-        // behavior. (Foreign-chain coverage on the streaming/oversize path is
-        // transitive: that branch already gates on blind-sign for any chain.)
-        if !is_avax_chain_bytes(tx.chain_id()) && !is_app_mode_blind_sign() {
-            return Err(Error::ApduCodeConditionsNotSatisfied);
-        }
+        // Foreign chain, deployment or unknown contract call: blind signing
+        check_blind_signing(&tx).map_err(|_| Error::ApduCodeConditionsNotSatisfied)?;
 
         let ui = SignUI {
             hash: unsigned_hash,
@@ -293,14 +309,8 @@ impl Sign {
         let unsigned_hash = Self::digest(txdata).map_err(|_| ParserError::UnexpectedError)?;
         let tx = unsafe { tx.assume_init() };
 
-        // Foreign EVM chain (not AVAX C-Chain): the device cannot resolve the
-        // native ticker symbol — the value field would render as "???" — so
-        // require blind-sign mode here, matching upstream Ledger Ethereum app
-        // behavior. (Foreign-chain coverage on the streaming/oversize path is
-        // transitive: that branch already gates on blind-sign for any chain.)
-        if !is_avax_chain_bytes(tx.chain_id()) && !is_app_mode_blind_sign() {
-            return Err(ParserError::BlindSignNotEnabled);
-        }
+        // Foreign chain, deployment or unknown contract call: blind signing
+        check_blind_signing(&tx)?;
 
         let ui = EthUi::Tx(SignUI {
             hash: unsigned_hash,
@@ -1112,7 +1122,7 @@ mod session_tests {
     use super::*;
     use crate::handlers::resources::PATHAccessors;
     use crate::parser::rlp_test_utils::{item, list, uint};
-    use crate::parser::{AVAX_C_CHAIN_MAINNET_ID, EIP1559_TX};
+    use crate::parser::{AVAX_C_CHAIN_MAINNET_ID, EIP1559_TX, EIP2930_TX};
     use serial_test::file_serial;
     use std::vec::Vec;
 
@@ -1549,6 +1559,252 @@ mod session_tests {
         assert!(ui.num_items().is_err());
         let (mut title, mut msg) = ([0u8; 64], [0u8; 256]);
         assert!(ui.render_item(0, &mut title, &mut msg, 0).is_err());
+        reset();
+    }
+
+    /// `flavour` ("legacy", "eip2930" or "eip1559") transaction on the AVAX
+    /// C-Chain sending `value` to `to` (empty for a deployment) with `data`
+    fn c_chain_tx(flavour: &str, to: &[u8], value: u128, data: &[u8]) -> Vec<u8> {
+        let id = uint(AVAX_C_CHAIN_MAINNET_ID as u128);
+        let (nonce, gas_price, gas) = (uint(1), uint(30_000_000_000), uint(100_000));
+        let (to, value, data) = (item(to), uint(value), item(data));
+        match flavour {
+            "legacy" => list(&[
+                nonce,
+                gas_price,
+                gas,
+                to,
+                value,
+                data,
+                id,
+                item(&[]),
+                item(&[]),
+            ]),
+            "eip2930" => {
+                let mut tx = std::vec![EIP2930_TX];
+                tx.extend(list(&[
+                    id,
+                    nonce,
+                    gas_price,
+                    gas,
+                    to,
+                    value,
+                    data,
+                    list(&[]),
+                ]));
+                tx
+            }
+            _ => {
+                let mut tx = std::vec![EIP1559_TX];
+                let tip = uint(1_000_000_000);
+                tx.extend(list(&[
+                    id,
+                    nonce,
+                    tip,
+                    gas_price,
+                    gas,
+                    to,
+                    value,
+                    data,
+                    list(&[]),
+                ]));
+                tx
+            }
+        }
+    }
+
+    const FLAVOURS: [&str; 3] = ["legacy", "eip2930", "eip1559"];
+
+    /// Calldata of a method the app does not decode: a selector, then
+    /// `words` ABI words filled with `fill`
+    fn unknown_call(words: usize, fill: u8) -> Vec<u8> {
+        let mut data = std::vec![0xde, 0xad, 0xbe, 0xef];
+        data.extend(std::vec![fill; 32 * words]);
+        data
+    }
+
+    /// Init code of a contract deployment
+    fn init_code() -> Vec<u8> {
+        let mut code = std::vec![0x60, 0x80, 0x60, 0x40, 0x52];
+        code.extend_from_slice(&[0x5b; 60]);
+        code
+    }
+
+    /// transfer(0xb2.., 1) on an ERC-20
+    fn erc20_transfer() -> Vec<u8> {
+        let mut data = std::vec![0xa9, 0x05, 0x9c, 0xbb];
+        data.extend_from_slice(&[0; 12]);
+        data.extend_from_slice(&[0xb2; 20]);
+        let mut amount = [0; 32];
+        amount[31] = 1;
+        data.extend_from_slice(&amount);
+        data
+    }
+
+    fn review_stored() -> bool {
+        unsafe { crate::lock_mut!(ETH_UI).lock(EthAccessors::Tx).is_some() }
+    }
+
+    /// Every page of the stored review, as "title: message"
+    fn rendered_review() -> Vec<std::string::String> {
+        let ui = unsafe { crate::lock_mut!(ETH_UI).lock(EthAccessors::Tx) };
+        let ui = ui.as_mut().expect("no review stored");
+        let mut pages = Vec::new();
+        for i in 0..ui.num_items().unwrap() {
+            let (mut title, mut msg) = ([0u8; 64], [0u8; 256]);
+            let count = ui.render_item(i, &mut title, &mut msg, 0).unwrap();
+            for page in 0..count {
+                let (mut title, mut msg) = ([0u8; 64], [0u8; 256]);
+                ui.render_item(i, &mut title, &mut msg, page).unwrap();
+                let text = |b: &[u8]| {
+                    let end = b.iter().position(|c| *c == 0).unwrap_or(b.len());
+                    std::string::String::from_utf8_lossy(&b[..end]).into_owned()
+                };
+                pages.push(std::format!("{}: {}", text(&title), text(&msg)));
+            }
+        }
+        pages
+    }
+
+    // V-028: a contract deployment or a call the app does not decode only
+    // shows a preview of the bytes it signs, so it is blind signing: refused
+    // while the setting is off, with the error that opens the blind-signing
+    // screen, and reviewed normally once the setting is on.
+    #[test]
+    #[file_serial(path)]
+    fn opaque_data_requires_blind_signing() {
+        let to = [0xa1; 20];
+        let (call, deploy) = (unknown_call(2, 0x11), init_code());
+
+        for flavour in FLAVOURS {
+            for (name, tx) in [
+                ("call", c_chain_tx(flavour, &to, 0, &call)),
+                ("call with value", c_chain_tx(flavour, &to, 1, &call)),
+                ("deploy", c_chain_tx(flavour, &[], 0, &deploy)),
+            ] {
+                reset();
+                crate::utils::set_blind_sign_for_test(false);
+                let res = send_tx(&tx);
+                crate::utils::set_blind_sign_for_test(true);
+                assert_eq!(
+                    res,
+                    Err(ParserError::BlindSignNotEnabled),
+                    "{flavour} {name} signed without blind signing"
+                );
+                assert!(!review_stored(), "{flavour} {name}: review left behind");
+
+                reset();
+                assert_eq!(send_tx(&tx), Ok(true), "{flavour} {name}");
+                assert_eq!(ui_hash(), keccak(&tx), "{flavour} {name}");
+                assert_eq!(accept(), Error::Success as u16, "{flavour} {name}");
+            }
+        }
+        reset();
+    }
+
+    // V-028: the legacy entry point applies the same policy.
+    #[test]
+    #[file_serial(path)]
+    fn start_sign_requires_blind_signing_for_opaque_data() {
+        for flavour in FLAVOURS {
+            let tx = c_chain_tx(flavour, &[0xa1; 20], 0, &unknown_call(2, 0x11));
+            let tx: &'static [u8] = std::vec::Vec::leak(tx);
+            // the test UI accepts at once, which signs with this path
+            let set_path = || {
+                let (_, path) = parse_bip32_eth(&init_payload(&[])).unwrap();
+                unsafe { crate::lock_mut!(PATH).lock(Sign).replace(path) };
+            };
+
+            reset();
+            set_path();
+            crate::utils::set_blind_sign_for_test(false);
+            let res = Sign::start_sign(tx, &mut 0);
+            crate::utils::set_blind_sign_for_test(true);
+            assert_eq!(res, Err(Error::ApduCodeConditionsNotSatisfied), "{flavour}");
+
+            reset();
+            set_path();
+            assert!(Sign::start_sign(tx, &mut 0).is_ok(), "{flavour}");
+            // drop the signature the test UI kept for the next APDU
+            assert!(zemu_sys::get_out().is_some(), "{flavour}: not signed");
+        }
+        reset();
+    }
+
+    // V-028: transactions shown in full keep being signed without blind
+    // signing.
+    #[test]
+    #[file_serial(path)]
+    fn clear_signed_txs_need_no_blind_signing() {
+        const HUNDRED_AVAX: u128 = 100_000_000_000_000_000_000;
+
+        for flavour in FLAVOURS {
+            for (name, tx) in [
+                (
+                    "transfer",
+                    c_chain_tx(flavour, &[0xb2; 20], HUNDRED_AVAX, &[]),
+                ),
+                (
+                    "erc20 transfer",
+                    c_chain_tx(flavour, &[0xa1; 20], 0, &erc20_transfer()),
+                ),
+            ] {
+                reset();
+                crate::utils::set_blind_sign_for_test(false);
+                let res = send_tx(&tx);
+                let review = res.is_ok().then(rendered_review);
+                crate::utils::set_blind_sign_for_test(true);
+
+                assert_eq!(res, Ok(true), "{flavour} {name}");
+                assert_eq!(ui_hash(), keccak(&tx), "{flavour} {name}");
+                assert!(!unsafe { rs_eth_was_streaming_mode_used() });
+                let review = review.unwrap();
+                if name == "erc20 transfer" {
+                    assert!(review.iter().any(|p| p.contains("ERC-20")), "{review:?}");
+                }
+            }
+        }
+        reset();
+    }
+
+    // V-028: two calls that differ only past the data preview show the same
+    // review, so neither may be signed without blind signing.
+    #[test]
+    #[file_serial(path)]
+    fn calldata_past_the_preview_is_not_clear_signed() {
+        let to = [0xa1; 20];
+        let original = unknown_call(4, 0x11);
+        let mut tampered = original.clone();
+        // past DEPLOY_DATA_PREVIEW_LEN, which is all the review shows
+        tampered[crate::parser::DEPLOY_DATA_PREVIEW_LEN + 10] ^= 0xff;
+        *tampered.last_mut().unwrap() ^= 0xff;
+
+        for flavour in FLAVOURS {
+            let (a, b) = (
+                c_chain_tx(flavour, &to, 0, &original),
+                c_chain_tx(flavour, &to, 0, &tampered),
+            );
+
+            // with the setting on, the reviews cannot be told apart...
+            reset();
+            assert_eq!(send_tx(&a), Ok(true));
+            let review_a = rendered_review();
+            reset();
+            assert_eq!(send_tx(&b), Ok(true));
+            let review_b = rendered_review();
+            assert_eq!(review_a, review_b, "{flavour}: the change is shown");
+            assert_ne!(keccak(&a), keccak(&b));
+
+            // ...so with it off neither is reviewed
+            for tx in [&a, &b] {
+                reset();
+                crate::utils::set_blind_sign_for_test(false);
+                let res = send_tx(tx);
+                crate::utils::set_blind_sign_for_test(true);
+                assert_eq!(res, Err(ParserError::BlindSignNotEnabled), "{flavour}");
+                assert!(!review_stored());
+            }
+        }
         reset();
     }
 

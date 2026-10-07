@@ -219,6 +219,19 @@ impl EthTransaction<'_> {
             Self::Eip2930(t) => t.chain_id(),
         }
     }
+
+    /// Whether the review of this transaction leaves signed bytes off the
+    /// screen (see [`crate::parser::EthData::requires_blind_signing`]), so
+    /// that it may only be signed with blind signing enabled.
+    pub fn requires_blind_signing(&self) -> bool {
+        let data = match self {
+            Self::Legacy(t) => &t.base.data,
+            Self::Eip1559(t) => t.data(),
+            Self::Eip2930(t) => &t.base.data,
+        };
+
+        data.requires_blind_signing()
+    }
 }
 
 impl<'b> FromBytes<'b> for EthTransaction<'b> {
@@ -609,6 +622,57 @@ mod tests {
         ));
         assert!(pages.iter().any(|p| p.contains("ERC-20")), "{pages:#?}");
         assert!(!pages.iter().any(|p| p.contains("Value")), "{pages:#?}");
+    }
+
+    /// Selector the app does not decode, followed by two ABI words
+    fn unknown_call_calldata() -> Vec<u8> {
+        let mut data = hex::decode("deadbeef").unwrap();
+        data.extend_from_slice(&[0x11; 64]);
+        data
+    }
+
+    // V-028: a deployment or a call the app does not decode is only shown as
+    // a preview of its data, in every transaction flavour; decoded data and
+    // plain transfers are shown in full.
+    #[test]
+    fn opaque_data_requires_blind_signing() {
+        // nativeAssetCall precompile: asset transfer (address, asset, amount)
+        let mut asset_precompile = [0u8; 20];
+        asset_precompile[0] = 0x01;
+        asset_precompile[19] = 0x02;
+        let mut asset_call = std::vec![0xc3; 20];
+        asset_call.extend_from_slice(&[0x77; 32]);
+        asset_call.extend_from_slice(&[0x01; 32]);
+
+        let init_code = std::vec![0x60, 0x80, 0x60, 0x40, 0x52];
+
+        // name, to, value, data, whether it is blind signing
+        type Case<'a> = (&'a str, &'a [u8], u128, Vec<u8>, bool);
+        let cases: [Case; 5] = [
+            ("unknown call", &EOA, 0, unknown_call_calldata(), true),
+            ("deploy", &[], 0, init_code, true),
+            ("transfer", &RECIPIENT, HUNDRED_AVAX, std::vec![], false),
+            ("erc20 transfer", &EOA, 0, erc20_transfer_calldata(), false),
+            ("asset call", &asset_precompile, 0, asset_call, false),
+        ];
+
+        let mut wrong = Vec::new();
+        for flavour in ["legacy", "eip2930", "eip1559"] {
+            for (name, to, value, data, blind) in &cases {
+                let id = AVAX_C_CHAIN_MAINNET_ID;
+                let raw = match flavour {
+                    "legacy" => legacy_tx(id, to, *value, data),
+                    "eip2930" => eip2930_tx(id, to, *value, data),
+                    _ => eip1559_tx(id, to, *value, data),
+                };
+                let (_, tx) = EthTransaction::from_bytes(&raw)
+                    .unwrap_or_else(|e| panic!("{flavour} {name}: {e:?}"));
+                if tx.requires_blind_signing() != *blind {
+                    wrong.push(std::format!("{flavour} {name}"));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "misclassified: {wrong:?}");
     }
 
     // AVAX-17: NFT info provided for an allow-listed ERC-20 must not turn a

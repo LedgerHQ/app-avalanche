@@ -151,9 +151,13 @@ impl<'b> FromBytes<'b> for Eip1559<'b> {
     }
 }
 
-impl Eip1559<'_> {
+impl<'b> Eip1559<'b> {
     pub fn chain_id(&self) -> &[u8] {
         self.chain_id
+    }
+
+    pub fn data(&self) -> &EthData<'b> {
+        &self.data
     }
 
     fn currency_prefix(&self) -> &'static [u8] {

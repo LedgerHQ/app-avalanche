@@ -54,6 +54,25 @@ pub enum EthData<'b> {
 }
 
 impl<'b> EthData<'b> {
+    /// Whether this data is only partly shown on screen, so that signing it
+    /// is blind signing.
+    ///
+    /// A contract deployment and a call the app does not decode are shown as
+    /// a short hex preview of their first bytes: the rest of the bytes, which
+    /// the signature also covers, never reach the screen. Every other kind is
+    /// decoded in full (the token and asset-call parsers refuse trailing
+    /// bytes).
+    pub fn requires_blind_signing(&self) -> bool {
+        match self {
+            Self::Deploy(_) | Self::ContractCall(_) => true,
+            Self::None | Self::AssetCall(_) => false,
+            #[cfg(feature = "erc20")]
+            Self::Erc20(_) => false,
+            #[cfg(feature = "erc721")]
+            Self::Erc721(_) => false,
+        }
+    }
+
     pub fn parse_into(
         to: &Option<Address<'b>>,
         input: &'b [u8],
