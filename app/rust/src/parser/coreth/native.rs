@@ -721,6 +721,45 @@ mod tests {
         out
     }
 
+    // V-107: an amount using every digit of a uint256 is rendered, for a
+    // token approval and for the native value alike.
+    #[test]
+    fn full_width_amounts_render() {
+        use rlp_test_utils::*;
+        const USDC_E: [u8; 20] = [
+            0xA7, 0xD7, 0x07, 0x9B, 0x0F, 0xEA, 0xD9, 0x1F, 0x3E, 0x65, 0xF8, 0x6E, 0x89, 0x15,
+            0xCB, 0x59, 0xC1, 0xA4, 0xC6, 0x64,
+        ];
+
+        // approve(RECIPIENT, MAX - 1)
+        let mut data = hex::decode("095ea7b3").unwrap();
+        data.extend_from_slice(&[0; 12]);
+        data.extend_from_slice(&RECIPIENT);
+        data.extend_from_slice(&[0xff; 31]);
+        data.push(0xfe);
+        let pages = render_all(eip1559_tx(AVAX_C_CHAIN_MAINNET_ID, &USDC_E, 0, &data));
+        let amount = "\"Amount\": \"115792089237316195423570985008687907853269984665640564039457584007913129.639934 USDC.e\"";
+        assert!(pages.iter().any(|p| p == amount), "{pages:#?}");
+
+        // MAX wei sent to an EOA
+        let mut tx = std::vec![EIP1559_TX];
+        tx.extend(list(&[
+            uint(AVAX_C_CHAIN_MAINNET_ID as u128),
+            uint(1),
+            uint(1_000_000_000),
+            uint(30_000_000_000),
+            uint(100_000),
+            item(&RECIPIENT),
+            item(&[0xff; 32]),
+            item(&[]),
+            list(&[]),
+        ]));
+        let pages = render_all(tx);
+        let value =
+            "AVAX 115792089237316195423570985008687907853269984665640564039457.584007913129639935";
+        assert!(pages.iter().any(|p| p.contains(value)), "{pages:#?}");
+    }
+
     // V-028: the ERC-721 parser decodes every call in full but the `bytes
     // data` of safeTransferFrom, which is not shown: passing any makes the
     // call blind signing, and the 3-argument form carries no more bytes.
