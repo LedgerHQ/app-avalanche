@@ -23,6 +23,7 @@ use crate::parser::{Address, DisplayableItem, ParserError};
 mod asset_call;
 mod contract_call;
 mod deploy;
+mod opaque_data;
 
 #[cfg(feature = "erc20")]
 mod erc20;
@@ -54,15 +55,15 @@ pub enum EthData<'b> {
 }
 
 impl<'b> EthData<'b> {
-    /// Whether this data is only partly shown on screen, so that signing it
+    /// Whether this data is not shown in full on screen, so that signing it
     /// is blind signing.
     ///
-    /// A contract deployment and a call the app does not decode are shown as
-    /// a short hex preview of their first bytes: the rest of the bytes, which
-    /// the signature also covers, never reach the screen. The same goes for
-    /// the `bytes data` an ERC-721 `safeTransferFrom` may pass on. Every
-    /// other kind is decoded in full (the token and asset-call parsers refuse
-    /// trailing bytes).
+    /// A contract deployment and a call the app does not decode cannot be
+    /// read on the device: the review only shows their length and keccak-256
+    /// hash (and the function selector of a call), to check against the
+    /// dApp. The `bytes data` an ERC-721 `safeTransferFrom` may pass on is
+    /// not shown at all. Every other kind is decoded in full (the token and
+    /// asset-call parsers refuse trailing bytes).
     pub fn requires_blind_signing(&self) -> bool {
         match self {
             Self::Deploy(_) | Self::ContractCall(_) => true,
@@ -143,10 +144,9 @@ impl<'b> EthData<'b> {
             return Err(ParserError::NoData);
         }
 
-        // read all the data as the contract deployment
-        // we do not have a way to verify this data. in the worst scenario
-        // the transaction would be rejected, and for this reason
-        // It is shown on the screen(partially) for the user to review.
+        // read all the data as the contract deployment: we have no way to
+        // decode it, so the review shows its length and hash for the user to
+        // check against the dApp (and requires blind signing).
         Self::init_as_deploy(|deploy| Deploy::parse_into(data, deploy), out)
     }
 

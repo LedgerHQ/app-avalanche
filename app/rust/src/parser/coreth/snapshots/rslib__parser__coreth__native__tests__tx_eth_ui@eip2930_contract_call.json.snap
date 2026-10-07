@@ -8,6 +8,8 @@ input_file: src/parser/coreth/eth_testvectors/eip2930_contract_call.json
     "Contract": "Call",
     "Transfer": "??? 0.0000000000001",
     "To": "0xcccccccccccccccccccccccccccccccccccccccc",
-    "Contract Data: ": "0x7f7465737432000000000000000000000000000000000000000000000000...",
+    "Function": "0x7f746573",
+    "Data Length": "324 bytes",
+    "Data Hash": "0x46d6a617a2683bc36cadd0b551398f2c6faf368ef8521de8ebcf67db15d130b9",
     "Maximun Fee(GWEI)": "0.04",
 ]

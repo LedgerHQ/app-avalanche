@@ -19,18 +19,22 @@ use core::{mem::MaybeUninit, ptr::addr_of_mut};
 use nom::number::complete::be_u32;
 use zemu_sys::ViewError;
 
-use crate::{
-    handlers::handle_ui_message,
-    parser::{DisplayableItem, ParserError, DEPLOY_DATA_PREVIEW_LEN},
-    utils::hex_encode,
-};
+use super::opaque_data::{render_0x_hex, OpaqueData};
+use crate::parser::{DisplayableItem, ParserError};
 
-/// General type that encompases different possibles
-/// contract call. There are contract calls that we need to support
-/// as ERC20, ERC721.
+/// A contract call whose data none of the app's parsers (ERC-20, ERC-721,
+/// asset call) decodes.
+///
+/// Signing it is blind signing: the review shows the 4-byte function
+/// selector, then the length and the keccak-256 hash of the whole calldata,
+/// so the user can check it against what the dApp sends.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(any(test, feature = "derive-debug"), derive(Debug))]
-pub struct ContractCall<'b>(&'b [u8]);
+pub struct ContractCall<'b>(OpaqueData<'b>);
+
+impl ContractCall<'_> {
+    const SELECTOR_LEN: usize = 4;
+}
 
 impl<'b> ContractCall<'b> {
     pub fn parse_into(data: &'b [u8], output: &mut MaybeUninit<Self>) -> Result<(), ParserError> {
@@ -47,25 +51,20 @@ impl<'b> ContractCall<'b> {
         // C-Chain (the device returns 0x6984 and never shows a review screen).
         //
         // The trailing bytes are still covered by the transaction signing
-        // hash, and the renderer only ever shows a generic `0x...` preview of
-        // this slice, so accepting them is both safe and consistent with how a
-        // generic contract call is already displayed. We only require a full
-        // 4-byte selector to be present.
+        // hash, and the review shows the length and the hash of the whole
+        // calldata, so accepting them is safe. We only require a full 4-byte
+        // selector to be present.
         let _ = be_u32(data)?;
 
-        // safe writes
-        unsafe {
-            addr_of_mut!((*out).0).write(data);
-        }
-
-        Ok(())
+        let opaque = unsafe { &mut *addr_of_mut!((*out).0).cast() };
+        OpaqueData::parse_into(data, opaque)
     }
 }
 
 impl DisplayableItem for ContractCall<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        // data
-        Ok(1)
+        // selector, data length and hash
+        Ok(1 + OpaqueData::NUM_ITEMS)
     }
 
     fn render_item(
@@ -76,30 +75,22 @@ impl DisplayableItem for ContractCall<'_> {
         page: u8,
     ) -> Result<u8, ViewError> {
         use bolos::{pic_str, PIC};
-        if item_n != 0 {
-            return Err(ViewError::NoData);
+
+        match item_n {
+            0 => {
+                let label = pic_str!(b"Function");
+                title[..label.len()].copy_from_slice(label);
+
+                // parse_into checked the selector is there
+                let selector = self
+                    .0
+                    .data()
+                    .get(..Self::SELECTOR_LEN)
+                    .ok_or(ViewError::Unknown)?;
+                render_0x_hex(selector, message, page)
+            }
+            x => self.0.render_item(x - 1, title, message, page),
         }
-
-        let title_content = pic_str!(b"Contract Data: ");
-        title[..title_content.len()].copy_from_slice(title_content);
-
-        let prefix = pic_str!(b"0x"!);
-        let suffix = pic_str!(b"...");
-        let mut output = [0; DEPLOY_DATA_PREVIEW_LEN * 2 + 2 + 4];
-        output[..prefix.len()].copy_from_slice(&prefix[..]);
-        let mut sz = prefix.len();
-
-        let mut len = DEPLOY_DATA_PREVIEW_LEN;
-        if self.0.len() < DEPLOY_DATA_PREVIEW_LEN {
-            len = self.0.len();
-        }
-
-        sz += hex_encode(&self.0[..len], &mut output[prefix.len()..])
-            .map_err(|_| ViewError::Unknown)?;
-        output[sz..sz + suffix.len()].copy_from_slice(&suffix[..]);
-        sz += suffix.len();
-
-        handle_ui_message(&output[..sz], message, page)
     }
 }
 
@@ -118,7 +109,7 @@ mod tests {
     fn accepts_bare_selector() {
         let data = [0x12, 0x34, 0x56, 0x78];
         let cc = parse(&data).expect("bare selector should parse");
-        assert_eq!(cc.0, &data);
+        assert_eq!(cc.0.data(), &data);
     }
 
     // Word-aligned ABI calldata (selector + N*32-byte words) still parses.
@@ -127,7 +118,7 @@ mod tests {
         let mut data = std::vec![0xa9, 0x05, 0x9c, 0xbb];
         data.extend_from_slice(&[0u8; 64]);
         let cc = parse(&data).expect("aligned args should parse");
-        assert_eq!(cc.0, &data[..]);
+        assert_eq!(cc.0.data(), &data[..]);
     }
 
     // Regression: real Uniswap UniversalRouter calldata is the ABI-encoded
@@ -144,7 +135,7 @@ mod tests {
         assert_ne!((data.len() - 4) % 32, 0, "test data must be non-aligned");
         let cc = parse(&data).expect("trailing suffix must be accepted");
         // The whole calldata, suffix included, is retained for hashing/display.
-        assert_eq!(cc.0, &data[..]);
+        assert_eq!(cc.0.data(), &data[..]);
     }
 
     // Fewer than 4 bytes cannot contain a selector.

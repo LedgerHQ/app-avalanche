@@ -668,6 +668,79 @@ mod tests {
         assert!(wrong.is_empty(), "misclassified: {wrong:?}");
     }
 
+    /// A `flavour` transaction on the C-Chain
+    fn c_chain_tx(flavour: &str, to: &[u8], value: u128, data: &[u8]) -> Vec<u8> {
+        let id = AVAX_C_CHAIN_MAINNET_ID;
+        match flavour {
+            "legacy" => legacy_tx(id, to, value, data),
+            "eip2930" => eip2930_tx(id, to, value, data),
+            _ => eip1559_tx(id, to, value, data),
+        }
+    }
+
+    // V-028: the data of a call the app does not decode, or of a deployment,
+    // is reviewed by its selector (calls only), length and keccak-256 hash,
+    // in every flavour, with and without native value; the fee stays the
+    // last screen. render_all drives the review like the device does, so a
+    // hole or an item count out of step with the screens fails it.
+    #[test]
+    fn opaque_data_shows_selector_length_and_hash() {
+        use bolos::hash::{Hasher, Keccak};
+
+        let call = unknown_call_calldata();
+        let init_code = std::vec![0x60, 0x80, 0x60, 0x40, 0x52, 0x34, 0x80, 0x15];
+        let screen =
+            |title: &str, value: std::string::String| std::format!("\"{title}\": \"{value}\"");
+        let hash = |data: &[u8]| {
+            let h = Keccak::<32>::digest(data).unwrap();
+            std::format!("0x{}", hex::encode(h))
+        };
+
+        let mut wrong = Vec::new();
+        for flavour in FLAVOURS {
+            for value in [0, HUNDRED_AVAX] {
+                // name, to, data, the screens expected for the data
+                type Case<'a> = (&'a str, &'a [u8], &'a [u8], Vec<String>);
+                let cases: [Case; 2] = [
+                    (
+                        "call",
+                        &EOA,
+                        &call,
+                        std::vec![
+                            screen("Function", "0xdeadbeef".into()),
+                            screen("Data Length", "68 bytes".into()),
+                            screen("Data Hash", hash(&call)),
+                        ],
+                    ),
+                    (
+                        "deploy",
+                        &[],
+                        &init_code,
+                        std::vec![
+                            screen("Data Length", "8 bytes".into()),
+                            screen("Data Hash", hash(&init_code)),
+                        ],
+                    ),
+                ];
+                for (name, to, data, expected) in cases {
+                    let pages = render_all(c_chain_tx(flavour, to, value, data));
+                    let start = pages.iter().position(|p| *p == expected[0]);
+                    let shown = start.map(|i| &pages[i..]);
+                    let ok = shown.is_some_and(|s| {
+                        // the data screens, then the fee and nothing else
+                        s.len() == expected.len() + 1
+                            && s[..expected.len()] == expected[..]
+                            && s[expected.len()].contains("Fee")
+                    });
+                    if !ok {
+                        wrong.push(std::format!("{flavour} {name} value={value}: {pages:#?}"));
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
     const FLAVOURS: [&str; 3] = ["legacy", "eip2930", "eip1559"];
 
     /// Parse a `flavour` transaction on the C-Chain and tell whether it

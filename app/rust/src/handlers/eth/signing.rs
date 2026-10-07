@@ -87,8 +87,8 @@ fn checked_chain_id(id: &[u8], legacy: bool) -> Result<[u8; 8], ParserError> {
 /// That is a transaction on a foreign EVM chain, whose native ticker the
 /// device cannot resolve (the value would render as "???"), and one whose
 /// data is not decoded in full (a contract deployment or a call to a method
-/// the app does not know), whose review only shows a short preview of the
-/// bytes it signs. A streamed transaction is never parsed and gates on the
+/// the app does not know), whose review only shows the length and hash of
+/// the bytes it signs. A streamed transaction is never parsed and gates on the
 /// setting on its own path, with the same error.
 ///
 /// The setting is only read for these transactions: on the device, reading it
@@ -1769,7 +1769,8 @@ mod session_tests {
     }
 
     // V-028: a contract deployment or a call the app does not decode only
-    // shows a preview of the bytes it signs, so it is blind signing: refused
+    // shows the length and hash of the bytes it signs, so it is blind
+    // signing: refused
     // while the setting is off, with the error that opens the blind-signing
     // screen, and reviewed normally once the setting is on.
     #[test]
@@ -1936,42 +1937,62 @@ mod session_tests {
         reset();
     }
 
-    // V-028: two calls that differ only past the data preview show the same
-    // review, so neither may be signed without blind signing.
+    // V-028: two calls, or two deployments, whose data differ only past the
+    // 30 bytes the review used to preview show the same length but different
+    // data hashes; neither may be signed without blind signing.
     #[test]
     #[file_serial(path)]
-    fn calldata_past_the_preview_is_not_clear_signed() {
+    fn data_past_the_first_bytes_changes_the_review() {
         let to = [0xa1; 20];
-        let original = unknown_call(4, 0x11);
-        let mut tampered = original.clone();
-        // past DEPLOY_DATA_PREVIEW_LEN, which is all the review shows
-        tampered[crate::parser::DEPLOY_DATA_PREVIEW_LEN + 10] ^= 0xff;
-        *tampered.last_mut().unwrap() ^= 0xff;
+        let tamper = |data: &[u8]| {
+            let mut tampered = data.to_vec();
+            tampered[40] ^= 0xff;
+            *tampered.last_mut().unwrap() ^= 0xff;
+            tampered
+        };
+        let call = unknown_call(4, 0x11);
+        let deploy = init_code();
 
         for flavour in FLAVOURS {
-            let (a, b) = (
-                c_chain_tx(flavour, &to, 0, &original),
-                c_chain_tx(flavour, &to, 0, &tampered),
-            );
+            for (to, original) in [(&to[..], &call), (&[][..], &deploy)] {
+                let tampered = tamper(original);
+                let (a, b) = (
+                    c_chain_tx(flavour, to, 0, original),
+                    c_chain_tx(flavour, to, 0, &tampered),
+                );
 
-            // with the setting on, the reviews cannot be told apart...
-            reset();
-            assert_eq!(send_tx(&a), Ok(true));
-            let review_a = rendered_review();
-            reset();
-            assert_eq!(send_tx(&b), Ok(true));
-            let review_b = rendered_review();
-            assert_eq!(review_a, review_b, "{flavour}: the change is shown");
-            assert_ne!(keccak(&a), keccak(&b));
-
-            // ...so with it off neither is reviewed
-            for tx in [&a, &b] {
+                // with the setting on, the reviews differ in the hash only...
                 reset();
-                crate::utils::set_blind_sign_for_test(false);
-                let res = send_tx(tx);
-                crate::utils::set_blind_sign_for_test(true);
-                assert_eq!(res, Err(ParserError::BlindSignNotEnabled), "{flavour}");
-                assert!(!review_stored());
+                assert_eq!(send_tx(&a), Ok(true));
+                let review_a = rendered_review();
+                reset();
+                assert_eq!(send_tx(&b), Ok(true));
+                let review_b = rendered_review();
+                assert_ne!(keccak(&a), keccak(&b));
+
+                assert_eq!(review_a.len(), review_b.len(), "{flavour}");
+                let differ: Vec<_> = review_a
+                    .iter()
+                    .zip(&review_b)
+                    .filter(|(a, b)| a != b)
+                    .map(|(a, _)| a.split(':').next().unwrap())
+                    .collect();
+                assert!(
+                    !differ.is_empty() && differ.iter().all(|t| *t == "Data Hash"),
+                    "{flavour}: {review_a:?} / {review_b:?}"
+                );
+                let length = std::format!("Data Length: {} bytes", original.len());
+                assert!(review_a.contains(&length), "{flavour}: {review_a:?}");
+
+                // ...and with it off neither is reviewed
+                for tx in [&a, &b] {
+                    reset();
+                    crate::utils::set_blind_sign_for_test(false);
+                    let res = send_tx(tx);
+                    crate::utils::set_blind_sign_for_test(true);
+                    assert_eq!(res, Err(ParserError::BlindSignNotEnabled), "{flavour}");
+                    assert!(!review_stored());
+                }
             }
         }
         reset();
