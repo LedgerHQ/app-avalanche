@@ -59,9 +59,10 @@ impl<'b> EthData<'b> {
     ///
     /// A contract deployment and a call the app does not decode are shown as
     /// a short hex preview of their first bytes: the rest of the bytes, which
-    /// the signature also covers, never reach the screen. Every other kind is
-    /// decoded in full (the token and asset-call parsers refuse trailing
-    /// bytes).
+    /// the signature also covers, never reach the screen. The same goes for
+    /// the `bytes data` an ERC-721 `safeTransferFrom` may pass on. Every
+    /// other kind is decoded in full (the token and asset-call parsers refuse
+    /// trailing bytes).
     pub fn requires_blind_signing(&self) -> bool {
         match self {
             Self::Deploy(_) | Self::ContractCall(_) => true,
@@ -69,7 +70,7 @@ impl<'b> EthData<'b> {
             #[cfg(feature = "erc20")]
             Self::Erc20(_) => false,
             #[cfg(feature = "erc721")]
-            Self::Erc721(_) => false,
+            Self::Erc721(d) => d.requires_blind_signing(),
         }
     }
 

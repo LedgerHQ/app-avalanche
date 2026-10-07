@@ -657,18 +657,135 @@ mod tests {
         ];
 
         let mut wrong = Vec::new();
-        for flavour in ["legacy", "eip2930", "eip1559"] {
+        for flavour in FLAVOURS {
             for (name, to, value, data, blind) in &cases {
-                let id = AVAX_C_CHAIN_MAINNET_ID;
-                let raw = match flavour {
-                    "legacy" => legacy_tx(id, to, *value, data),
-                    "eip2930" => eip2930_tx(id, to, *value, data),
-                    _ => eip1559_tx(id, to, *value, data),
-                };
-                let (_, tx) = EthTransaction::from_bytes(&raw)
-                    .unwrap_or_else(|e| panic!("{flavour} {name}: {e:?}"));
-                if tx.requires_blind_signing() != *blind {
-                    wrong.push(std::format!("{flavour} {name}"));
+                let res = requires_blind_signing_in(flavour, to, *value, data);
+                if res != Ok(*blind) {
+                    wrong.push(std::format!("{flavour} {name}: {res:?}"));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "misclassified: {wrong:?}");
+    }
+
+    const FLAVOURS: [&str; 3] = ["legacy", "eip2930", "eip1559"];
+
+    /// Parse a `flavour` transaction on the C-Chain and tell whether it
+    /// requires blind signing
+    fn requires_blind_signing_in(
+        flavour: &str,
+        to: &[u8],
+        value: u128,
+        data: &[u8],
+    ) -> Result<bool, ParserError> {
+        let id = AVAX_C_CHAIN_MAINNET_ID;
+        let raw = match flavour {
+            "legacy" => legacy_tx(id, to, value, data),
+            "eip2930" => eip2930_tx(id, to, value, data),
+            _ => eip1559_tx(id, to, value, data),
+        };
+        let (_, tx) = EthTransaction::from_bytes(&raw)?;
+        Ok(tx.requires_blind_signing())
+    }
+
+    /// safeTransferFrom(0xc3.., RECIPIENT, 1), the 3-argument form
+    #[cfg(feature = "erc721")]
+    fn erc721_safe_transfer_from_calldata() -> Vec<u8> {
+        let mut data = erc721_transfer_from_calldata();
+        data[..4].copy_from_slice(&[0x42, 0x84, 0x2e, 0x0e]);
+        data
+    }
+
+    /// safeTransferFrom(0xc3.., RECIPIENT, 1, `bytes`), the 4-argument form,
+    /// followed by `tail`: the ABI encoding of the `bytes` argument
+    #[cfg(feature = "erc721")]
+    fn erc721_safe_transfer_from_with(tail: &[u8]) -> Vec<u8> {
+        let mut data = erc721_transfer_from_calldata();
+        data[..4].copy_from_slice(&[0xb8, 0x8d, 0x4f, 0xde]);
+        data.extend_from_slice(tail);
+        data
+    }
+
+    /// ABI encoding of a `bytes` argument after four head words
+    #[cfg(feature = "erc721")]
+    fn abi_bytes(content: &[u8]) -> Vec<u8> {
+        let word = |v: usize| {
+            let mut w = [0u8; 32];
+            w[24..].copy_from_slice(&(v as u64).to_be_bytes());
+            w
+        };
+        let mut out = word(4 * 32).to_vec();
+        out.extend_from_slice(&word(content.len()));
+        out.extend_from_slice(content);
+        out.resize(64 + content.len().div_ceil(32) * 32, 0);
+        out
+    }
+
+    // V-028: the ERC-721 parser decodes every call in full but the `bytes
+    // data` of safeTransferFrom, which is not shown: passing any makes the
+    // call blind signing, and the 3-argument form carries no more bytes.
+    #[test]
+    #[cfg(feature = "erc721")]
+    #[serial_test::file_serial(path)]
+    fn erc721_hidden_data_requires_blind_signing() {
+        provide_nft_info(&EOA, AVAX_C_CHAIN_MAINNET_ID);
+
+        let safe = erc721_safe_transfer_from_calldata();
+        let mut safe_trailing_word = safe.clone();
+        safe_trailing_word.extend_from_slice(&[0x11; 32]);
+        let mut safe_trailing_byte = safe.clone();
+        safe_trailing_byte.push(0x11);
+
+        let mut non_canonical_empty = abi_bytes(&[]);
+        non_canonical_empty[31] = 0xa0;
+        non_canonical_empty.extend_from_slice(&[0; 32]);
+
+        // the ERC-721 parser refuses bytes past the 3-argument form...
+        for data in [&safe_trailing_word, &safe_trailing_byte] {
+            let mut contract = core::mem::MaybeUninit::uninit();
+            crate::parser::Address::from_bytes_into(&EOA, &mut contract).unwrap();
+            let contract = unsafe { contract.assume_init() };
+            let mut call = core::mem::MaybeUninit::uninit();
+            assert_eq!(
+                crate::parser::coreth::data::ERC721::parse_into(&contract, data, &mut call),
+                Err(ParserError::UnexpectedData)
+            );
+        }
+
+        // ...so such a call is only a generic contract call
+        let cases: [(&str, Vec<u8>, Result<bool, ParserError>); 8] = [
+            ("transferFrom", erc721_transfer_from_calldata(), Ok(false)),
+            ("safeTransferFrom", safe, Ok(false)),
+            ("safeTransferFrom + word", safe_trailing_word, Ok(true)),
+            ("safeTransferFrom + byte", safe_trailing_byte, Ok(true)),
+            (
+                "safeTransferFrom(bytes) empty",
+                erc721_safe_transfer_from_with(&abi_bytes(&[])),
+                Ok(false),
+            ),
+            (
+                "safeTransferFrom(bytes) data",
+                erc721_safe_transfer_from_with(&abi_bytes(&[0xde, 0xad, 0xbe, 0xef])),
+                Ok(true),
+            ),
+            (
+                "safeTransferFrom(bytes) empty, non-canonical",
+                erc721_safe_transfer_from_with(&non_canonical_empty),
+                Ok(true),
+            ),
+            (
+                "safeTransferFrom(bytes) raw",
+                erc721_safe_transfer_from_with(&[0x11; 7]),
+                Ok(true),
+            ),
+        ];
+
+        let mut wrong = Vec::new();
+        for flavour in FLAVOURS {
+            for (name, data, expected) in &cases {
+                let res = requires_blind_signing_in(flavour, &EOA, 0, data);
+                if res != *expected {
+                    wrong.push(std::format!("{flavour} {name}: {res:?}"));
                 }
             }
         }

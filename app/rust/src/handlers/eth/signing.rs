@@ -1702,6 +1702,73 @@ mod session_tests {
         reset();
     }
 
+    // V-028: the `bytes data` an ERC-721 safeTransferFrom passes on is not
+    // shown, so such a transfer is blind signing; without data it is not.
+    #[test]
+    #[cfg(feature = "erc721")]
+    #[file_serial(path)]
+    fn erc721_transfer_with_data_requires_blind_signing() {
+        use crate::handlers::eth::provide_nft_info::Info;
+
+        // Smol Joes on the C-Chain
+        const NFT: [u8; 20] = [
+            0xc7, 0x0d, 0xf8, 0x7e, 0x1d, 0x98, 0xf6, 0xa5, 0x31, 0xc8, 0xe3, 0x24, 0xc9, 0xbc,
+            0xec, 0x6f, 0xc8, 0x2b, 0x5e, 0x8d,
+        ];
+        // NFT info descriptor: type 1, version 1, name, contract, chain id
+        let mut descriptor = std::vec![1u8, 1, 9];
+        descriptor.extend_from_slice(b"Smol Joes");
+        descriptor.extend_from_slice(&NFT);
+        descriptor.extend_from_slice(&43114u64.to_be_bytes());
+
+        // safeTransferFrom(0xc3.., 0xb2.., 1[, bytes])
+        let call = |selector: [u8; 4], tail: &[u8]| {
+            let mut data = selector.to_vec();
+            data.extend_from_slice(&[0; 12]);
+            data.extend_from_slice(&[0xc3; 20]);
+            data.extend_from_slice(&[0; 12]);
+            data.extend_from_slice(&[0xb2; 20]);
+            let mut token_id = [0; 32];
+            token_id[31] = 1;
+            data.extend_from_slice(&token_id);
+            data.extend_from_slice(tail);
+            data
+        };
+        // the `bytes` argument 0xdeadbeef: offset, length, padded content
+        let mut bytes = [0u8; 96];
+        bytes[31] = 0x80;
+        bytes[63] = 4;
+        bytes[64..68].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+
+        let plain = call([0x42, 0x84, 0x2e, 0x0e], &[]);
+        let with_data = call([0xb8, 0x8d, 0x4f, 0xde], &bytes);
+
+        for flavour in FLAVOURS {
+            let send = |data: &[u8], blind_sign: bool| {
+                reset();
+                Info::process(&descriptor).unwrap();
+                crate::utils::set_blind_sign_for_test(blind_sign);
+                let res = send_tx(&c_chain_tx(flavour, &NFT, 0, data));
+                crate::utils::set_blind_sign_for_test(true);
+                res
+            };
+
+            assert_eq!(send(&plain, false), Ok(true), "{flavour}");
+            assert!(rendered_review().iter().any(|p| p.contains("ERC-721")));
+
+            assert_eq!(
+                send(&with_data, false),
+                Err(ParserError::BlindSignNotEnabled),
+                "{flavour}: hidden data signed without blind signing"
+            );
+            assert!(!review_stored());
+
+            assert_eq!(send(&with_data, true), Ok(true), "{flavour}");
+            assert!(rendered_review().iter().any(|p| p.contains("ERC-721")));
+        }
+        reset();
+    }
+
     // V-028: the legacy entry point applies the same policy.
     #[test]
     #[file_serial(path)]
