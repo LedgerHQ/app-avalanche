@@ -33,6 +33,8 @@ extern uint16_t G_error_message_offset;
 
 __Z_INLINE void clean_up_hash_globals() { _clean_up_hash(); }
 
+__Z_INLINE void clean_up_eth_globals() { _clean_up_eth(); }
+
 __Z_INLINE void app_sign_hash(uint8_t curve_type) {
     zemu_log("app_sign_hash\n");
 
@@ -46,8 +48,12 @@ __Z_INLINE void app_sign_hash(uint8_t curve_type) {
     // prefix.
     err = _get_hash(hash, CX_SHA256_SIZE);
 
+    // Every exit below that ends the session releases (PATH, HASH), not only a
+    // successful LAST_MESSAGE. A refused suffix is just as terminal, and
+    // leaving the reviewed hash live let a later suffix APDU still sign it.
     if (err != zxerr_ok) {
         zemu_log("Error getting hash\n");
+        clean_up_hash_globals();
         set_code(G_io_apdu_buffer, 0, APDU_CODE_EXECUTION_ERROR);
         io_exchange(CHANNEL_APDU | IO_RETURN_AFTER_TX, 2);
         return;
@@ -68,6 +74,7 @@ __Z_INLINE void app_sign_hash(uint8_t curve_type) {
 
     if (err != zxerr_ok) {
         zemu_log("Error getting signing info\n");
+        clean_up_hash_globals();
         set_code(G_io_apdu_buffer, 0, APDU_CODE_EXECUTION_ERROR);
         io_exchange(CHANNEL_APDU | IO_RETURN_AFTER_TX, 2);
         return;
@@ -77,6 +84,7 @@ __Z_INLINE void app_sign_hash(uint8_t curve_type) {
                            curve_type);
 
     if (err != zxerr_ok) {
+        clean_up_hash_globals();
         set_code(G_io_apdu_buffer, 0, APDU_CODE_EXECUTION_ERROR);
         io_exchange(CHANNEL_APDU | IO_RETURN_AFTER_TX, 2);
     } else {
@@ -166,6 +174,10 @@ __Z_INLINE void app_reject() {
     // resources are untouched -- the cleanup only clears them while the
     // sign-hash handler holds the lock.
     clean_up_hash_globals();
+
+    // Same reasoning for the ETH handler: a refused review must not leave the
+    // streaming hash and its blind-signing flag behind for the next one.
+    clean_up_eth_globals();
 
     MEMZERO(G_io_apdu_buffer, IO_APDU_BUFFER_SIZE);
     set_code(G_io_apdu_buffer, 0, APDU_CODE_COMMAND_NOT_ALLOWED);

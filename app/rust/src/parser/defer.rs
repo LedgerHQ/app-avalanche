@@ -13,6 +13,7 @@
 *  See the License for the specific language governing permissions and
 *  limitations under the License.
 ********************************************************************************/
+use crate::utils::ApduPanic;
 use core::{marker::PhantomData, mem::MaybeUninit, ptr::addr_of_mut};
 use educe::Educe;
 use nom::bytes::complete::take;
@@ -42,9 +43,11 @@ where
 {
     #[inline(always)]
     pub fn read_into(&self, out: &mut MaybeUninit<Obj>) {
-        //safety: &self.data is checked during the constructor
-        Obj::from_bytes_into(self.data, out)
-            .unwrap_or_else(|_| unsafe { core::hint::unreachable_unchecked() });
+        // The invariant here -- that self.data already parsed once in the
+        // constructor -- holds across two separate calls on attacker-controlled
+        // bytes, which is not something the compiler can see at this call site.
+        // Trap deterministically rather than declaring it unreachable.
+        Obj::from_bytes_into(self.data, out).apdu_unwrap();
     }
 
     #[inline(always)]

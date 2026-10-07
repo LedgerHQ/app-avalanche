@@ -11,7 +11,9 @@ use nom::{
 pub struct AddressedCall<'b> {
     pub source_address_size: u32,
     pub source_address: &'b [u8],
-    pub message_type: u32,
+    // No message_type field: from_bytes_into validates the type id but never
+    // stored it, so the field stayed uninitialised across assume_init while the
+    // enclosing Transaction derives Copy and PartialEq. Nothing read it.
     pub payload: AddressedCallPayload<'b>,
 }
 

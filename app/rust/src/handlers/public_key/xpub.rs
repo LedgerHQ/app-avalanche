@@ -59,7 +59,13 @@ impl GetExtendedPublicKey {
     ) -> Result<(), Error> {
         sys::zemu_log_stack("GetExtendedPublicKey::fill_address\x00");
 
-        if addr_ui.is_null() || addr_ui_len < core::mem::size_of::<MaybeUninit<AddrUI>>() as u16 {
+        // This function writes an ExtendedPubkeyUI, so that is the size the
+        // caller's buffer has to cover. Measuring AddrUI instead accepted a
+        // buffer smaller than what gets written; it held only because the one
+        // C caller happens to pass the larger size.
+        if addr_ui.is_null()
+            || addr_ui_len < core::mem::size_of::<MaybeUninit<ExtendedPubkeyUI>>() as u16
+        {
             return Err(Error::DataInvalid);
         }
 

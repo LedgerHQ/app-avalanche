@@ -8,4 +8,5 @@ input_file: app/src/parser/testvectors/no_decimal.json
     "Transfer": "1 AVAX to ",
     "Address": "fuji12yp9cc0melq83a5nxnurf0nd6fk4t224unmnwx",
     "Fee(AVAX)": "1",
+    "Memo": "00010203",
 ]

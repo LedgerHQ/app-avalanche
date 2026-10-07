@@ -1,5 +1,6 @@
 ---
 source: src/parser/transactions/pvm/banff/set_auto_renewed_validator_config.rs
+assertion_line: 232
 expression: reduced
 ---
 [
@@ -7,5 +8,7 @@ expression: reduced
     "TxID": "0x3d0ad12b8ee8928edf248ca91ca55600fb383f07c32bff1d6dec472b25cf59a7",
     "AutoCompound(%)": "75",
     "Period(seconds)": "1209600",
+    "Amount": "9998000 AVAX to ",
+    "Address": "local13eheynlnea02xudsnkmw6av3t3ptaqecknyr9r",
     "Fee(AVAX)": "2000",
 ]

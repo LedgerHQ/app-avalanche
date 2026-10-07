@@ -52,7 +52,13 @@ impl<'b> FromBytes<'b> for SubnetAuth<'b> {
         let (rem, _) = tag(Self::TYPE_ID.to_be_bytes())(input)?;
         let (rem, num_indices) = be_u32(rem)?;
 
-        let (rem, indices) = take(num_indices as usize * U32_SIZE)(rem)?;
+        // num_indices is attacker-supplied and this multiply runs before any
+        // bounds check, so on the 32-bit target it can wrap and abort the app
+        // before the user is ever asked anything.
+        let indices_len = (num_indices as usize)
+            .checked_mul(U32_SIZE)
+            .ok_or(ParserError::ValueOutOfRange)?;
+        let (rem, indices) = take(indices_len)(rem)?;
         // This would not fail as previous line ensures we take
         // the right amount of bytes, also the alignemnt is correct
         let indices = bytemuck::try_cast_slice(indices).apdu_unwrap();

@@ -35,6 +35,7 @@ use crate::{
 };
 
 use super::utils::parse_bip32_eth;
+use super::verify_coreth_root_path;
 use crate::utils::convert_der_to_rs;
 
 pub struct Sign;
@@ -68,7 +69,6 @@ impl Sign {
 
     #[inline(never)]
     fn digest(buffer: &[u8]) -> Result<[u8; Self::SIGN_HASH_SIZE], Error> {
-
         let mut hasher = {
             let mut k = MaybeUninit::uninit();
             Keccak::<32>::new_gce(&mut k).map_err(|_| Error::Unknown)?;
@@ -149,6 +149,7 @@ impl Sign {
                 //parse path to verify it's the data we expect
                 let (rest, bip32_path) =
                     parse_bip32_eth(payload).map_err(|_| ParserError::InvalidPath)?;
+                verify_coreth_root_path(&bip32_path).map_err(|_| ParserError::InvalidPath)?;
 
                 unsafe {
                     crate::lock_mut!(PATH).lock(Self).replace(bip32_path);
@@ -179,7 +180,11 @@ impl Sign {
                     .payload()
                     .map_err(|_| ParserError::UnexpectedBufferEnd)?;
 
-                let buffer = unsafe { crate::lock_mut!(BUFFER).acquire(Self).map_err(|_| ParserError::NoData)? };
+                let buffer = unsafe {
+                    crate::lock_mut!(BUFFER)
+                        .acquire(Self)
+                        .map_err(|_| ParserError::NoData)?
+                };
 
                 buffer
                     .write(payload)
@@ -224,6 +229,7 @@ impl ApduHandler for Sign {
                 //parse path to verify it's the data we expect
                 let (rest, bip32_path) =
                     parse_bip32_eth(payload).map_err(|_| Error::DataInvalid)?;
+                verify_coreth_root_path(&bip32_path)?;
 
                 unsafe {
                     crate::lock_mut!(PATH).lock(Self).replace(bip32_path);

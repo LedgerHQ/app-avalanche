@@ -13,6 +13,7 @@
 *  See the License for the specific language governing permissions and
 *  limitations under the License.
 ********************************************************************************/
+use bolos::{pic_str, PIC};
 use core::ops::Deref;
 
 use core::{mem::MaybeUninit, ptr::addr_of_mut};
@@ -21,10 +22,10 @@ use zemu_sys::ViewError;
 
 use crate::parser::{
     DisplayableItem, FromBytes, ObjectList, Output, OutputIdx, ParserError, TransferableInput,
-    TransferableOutput,
+    TransferableOutput, MAX_ADDRESS_ENCODED_LEN,
 };
 
-const MAX_MEMO_LEN: usize = 256;
+pub const MAX_MEMO_LEN: usize = 256;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, derive(Debug))]
@@ -232,5 +233,62 @@ where
         }
 
         Ok(rem)
+    }
+}
+
+impl<'b, O> BaseTxFields<'b, O>
+where
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+{
+    /// Render one item of one base output, encoding addresses with `hrp`.
+    ///
+    /// Several transactions carry base outputs that their own renderers
+    /// never showed. They all need the same shape -- amount line, one screen
+    /// per address, then the locked-funds line where the output type has one
+    /// -- so it lives here rather than being copied into each of them. It is
+    /// generic over the output type because the X-chain CreateAsset needs it
+    /// as much as the P-chain types do.
+    pub fn render_base_output_with_hrp(
+        &'b self,
+        hrp: &str,
+        item_n: u8,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
+        let (obj, obj_item_n) = self
+            .base_output_with_item(item_n)
+            .map_err(|_| ViewError::NoData)?;
+
+        let inner: &Output<'_> = &obj.output;
+
+        // Only secp_transfer outputs are supported, as in import/export.
+        let _ = inner.secp_transfer().ok_or(ViewError::NoData)?;
+
+        // Items of the inner output alone. A locked PvmOutput counts one more
+        // (the locked-funds line), which its own render_item draws below.
+        let num_inner_items = inner.num_items()?;
+
+        match obj_item_n {
+            0 => obj.render_item(obj_item_n, title, message, page),
+            x @ 1.. if x < num_inner_items => {
+                let address_idx = x - 1;
+                let address = inner
+                    .get_address(address_idx as usize)
+                    .ok_or(ViewError::NoData)?;
+
+                let t = pic_str!(b"Address");
+                title[..t.len()].copy_from_slice(t);
+
+                let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
+                let addr_len = address
+                    .encode_into(hrp, &mut encoded[..])
+                    .map_err(|_| ViewError::Unknown)?;
+
+                crate::handlers::handle_ui_message(&encoded[..addr_len], message, page)
+            }
+            x if x == num_inner_items => obj.render_item(obj_item_n, title, message, page),
+            _ => Err(ViewError::NoData),
+        }
     }
 }
