@@ -301,3 +301,32 @@ describe.each(REJECTION_REGRESSION_MODELS)('signHash suffix during the review [%
     }
   })
 })
+
+describe.each(REJECTION_REGRESSION_MODELS)('signHash last suffix [%s]', function (m) {
+  // The signature is written over the APDU buffer, and app_sign_hash used to
+  // read P1 back from it afterwards, so the LAST_MESSAGE suffix did not
+  // reliably end the session and further suffixes kept signing the hash.
+  test('the last suffix releases the reviewed hash', async function () {
+    const sim = new Zemu(m.path)
+    try {
+      await sim.start(defaultOptions(m))
+      const transport = sim.getTransport()
+      const hash = Buffer.from(sha256('Last suffix Avalanche hash'), 'hex')
+
+      const review = transport.send(0x80, 0x04, 0x01, 0x00, Buffer.concat([signingRoot(), hash]))
+      await sim.waitUntilScreenIsNot(sim.getMainMenuSnapshot())
+      await sim.navigateUntilText('.', 'unused', sim.startOptions.approveKeyword, true, false)
+      await review
+
+      // LAST_MESSAGE suffix: signs and ends the session
+      const signature = await transport.send(0x80, 0x04, 0x02, 0x00, pathSuffix(0, 0))
+      expect(signature.length).toEqual(65 + 2)
+
+      await expect(transport.send(0x80, 0x04, 0x03, 0x00, pathSuffix(0, 1))).rejects.toMatchObject({
+        statusCode: LedgerError.ExecutionError,
+      })
+    } finally {
+      await sim.close()
+    }
+  })
+})
