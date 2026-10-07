@@ -1321,19 +1321,16 @@ mod session_tests {
         reset();
     }
 
-    /// An NFT info descriptor for Smol Joes, and an ERC-721
-    /// transferFrom(0xc3.., 0xb2.., 1) on that collection
+    /// The NFT info descriptor for Smol Joes, as Ledger's NFT metadata
+    /// service signs it, and an ERC-721 transferFrom(0xc3.., 0xb2.., 1) on
+    /// that collection
     #[cfg(feature = "erc721")]
     fn smol_joes_transfer() -> (Vec<u8>, Vec<u8>) {
         const NFT: [u8; 20] = [
             0xc7, 0x0d, 0xf8, 0x7e, 0x1d, 0x98, 0xf6, 0xa5, 0x31, 0xc8, 0xe3, 0x24, 0xc9, 0xbc,
             0xec, 0x6f, 0xc8, 0x2b, 0x5e, 0x8d,
         ];
-        // type 1, version 1, name, contract, chain id
-        let mut descriptor = std::vec![1u8, 1, 9];
-        descriptor.extend_from_slice(b"Smol Joes");
-        descriptor.extend_from_slice(&NFT);
-        descriptor.extend_from_slice(&AVAX_C_CHAIN_MAINNET_ID.to_be_bytes());
+        let descriptor = hex::decode(crate::parser::nft_info_test_vectors::SMOL_JOES).unwrap();
 
         let mut data = hex::decode("23b872dd").unwrap();
         data.extend_from_slice(&[0; 12]);
@@ -1410,6 +1407,33 @@ mod session_tests {
         // the next request was not given NFT info
         assert_eq!(send_tx(&nft_tx), Ok(true));
         assert!(!rendered().contains("ERC-721"), "stale NFT info used");
+        reset();
+
+        // V-016: a descriptor not signed by Ledger replaces the one provided
+        // before it, and its name is titled as unverified
+        Info::process(&descriptor).unwrap();
+        let mut forged = descriptor.clone();
+        let name = 3;
+        forged[name] = b'B';
+        assert_eq!(Info::process(&forged), Ok(()));
+        assert_eq!(send_tx(&nft_tx), Ok(true));
+        let shown = rendered();
+        assert!(shown.contains("ERC-721"));
+        assert!(shown.contains("NFT (unverified)"), "{shown}");
+        assert!(shown.contains("Bmol Joes"), "{shown}");
+        assert!(!shown.contains("Smol Joes"));
+        assert!(!shown.contains("Collection Name"));
+        reset();
+
+        // a malformed descriptor is refused, and drops the info provided
+        // before it rather than leaving it for the request
+        Info::process(&descriptor).unwrap();
+        let mut trailing = descriptor.clone();
+        trailing.push(0);
+        assert_eq!(Info::process(&trailing), Err(Error::DataInvalid));
+        assert_eq!(send_tx(&nft_tx), Ok(true));
+        assert!(!rendered().contains("ERC-721"), "stale NFT info used");
+        assert!(!rendered().contains("Smol Joes"));
         reset();
     }
 
@@ -1818,11 +1842,8 @@ mod session_tests {
             0xc7, 0x0d, 0xf8, 0x7e, 0x1d, 0x98, 0xf6, 0xa5, 0x31, 0xc8, 0xe3, 0x24, 0xc9, 0xbc,
             0xec, 0x6f, 0xc8, 0x2b, 0x5e, 0x8d,
         ];
-        // NFT info descriptor: type 1, version 1, name, contract, chain id
-        let mut descriptor = std::vec![1u8, 1, 9];
-        descriptor.extend_from_slice(b"Smol Joes");
-        descriptor.extend_from_slice(&NFT);
-        descriptor.extend_from_slice(&43114u64.to_be_bytes());
+        // its NFT info descriptor, as Ledger's NFT metadata service signs it
+        let descriptor = hex::decode(crate::parser::nft_info_test_vectors::SMOL_JOES).unwrap();
 
         // safeTransferFrom(0xc3.., 0xb2.., 1[, bytes])
         let call = |selector: [u8; 4], tail: &[u8]| {

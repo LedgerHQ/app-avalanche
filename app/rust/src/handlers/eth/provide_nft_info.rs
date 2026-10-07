@@ -19,7 +19,20 @@ pub struct Info;
 
 #[cfg(feature = "erc721")]
 impl Info {
+    /// Store the NFT descriptor in `input` for the next ERC-721 review, with
+    /// whether Ledger's NFT metadata key signed it.
+    ///
+    /// The review shows the collection name as the NFT being moved or
+    /// approved. The host can bind any name to any contract, so a
+    /// descriptor Ledger did not sign (the JS SDK's provideNFTInformation
+    /// sends one with a random signature) is stored as unverified and the
+    /// review titles its name "NFT (unverified)"; a Ledger-signed one gets
+    /// the plain "Collection Name" titles. A malformed descriptor is
+    /// refused, and drops any descriptor stored before it, so the review
+    /// falls back to showing the contract call without a name.
     pub fn process(input: &[u8]) -> Result<(), Error> {
+        use crate::parser::SignedNftDescriptor;
+
         crate::zlog("NftInfo::process\x00");
 
         // A parsed transaction holds the info from its parse until its
@@ -31,23 +44,27 @@ impl Info {
             return Err(Error::ApduCodeConditionsNotSatisfied);
         }
 
-        let mut nft_info = core::mem::MaybeUninit::uninit();
-        _ = crate::parser::FromBytes::from_bytes_into(input, &mut nft_info)
-            .map_err(|_| Error::DataInvalid)?;
+        let parsed = SignedNftDescriptor::parse(input).and_then(|d| d.info());
 
-        crate::zlog("NftInfo parsed\x00");
+        // held by the provider until the next sign request claims it; a
+        // refused descriptor also drops whatever an earlier one left
+        let stored = unsafe { crate::lock_mut!(crate::handlers::resources::NFT_INFO).lock(Info) };
 
-        let nft_info = unsafe { nft_info.assume_init() };
-
-        // store the information use to parse erc721 token
-        unsafe {
-            // held by the provider until the next sign request claims it
-            crate::lock_mut!(crate::handlers::resources::NFT_INFO)
-                .lock(Info)
-                .replace(nft_info);
+        match parsed {
+            Ok(nft_info) => {
+                if nft_info.verified() {
+                    crate::zlog("NftInfo verified\x00");
+                } else {
+                    crate::zlog("NftInfo unverified\x00");
+                }
+                stored.replace(nft_info);
+                Ok(())
+            }
+            Err(_) => {
+                stored.take();
+                Err(Error::DataInvalid)
+            }
         }
-
-        Ok(())
     }
 
     /// Whether a parsed ETH transaction holds NFT info for its review.

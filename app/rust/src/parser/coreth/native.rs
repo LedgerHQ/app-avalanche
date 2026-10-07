@@ -559,17 +559,46 @@ mod tests {
         assert!(hidden.is_empty(), "native value hidden for {hidden:?}");
     }
 
-    /// Store an NFT descriptor for `contract` on `chain_id`, as
-    /// INS_PROVIDE_NFT_INFORMATION would.
+    /// The Smol Joes collection on the C-Chain, for which Ledger's NFT
+    /// metadata service signs a descriptor
     #[cfg(feature = "erc721")]
-    pub(crate) fn provide_nft_info(contract: &[u8; 20], chain_id: u64) {
-        let mut descriptor = std::vec![1u8, 1, 4];
-        descriptor.extend_from_slice(b"Test");
-        descriptor.extend_from_slice(contract);
-        descriptor.extend_from_slice(&chain_id.to_be_bytes());
+    const SMOL_JOES: [u8; 20] = [
+        0xc7, 0x0d, 0xf8, 0x7e, 0x1d, 0x98, 0xf6, 0xa5, 0x31, 0xc8, 0xe3, 0x24, 0xc9, 0xbc, 0xec,
+        0x6f, 0xc8, 0x2b, 0x5e, 0x8d,
+    ];
 
-        let (_, info) = crate::parser::NftInfo::from_bytes(&descriptor).unwrap();
+    /// Store `descriptor` as INS_PROVIDE_NFT_INFORMATION does, and return
+    /// whether its signature verified.
+    #[cfg(feature = "erc721")]
+    fn provide_nft_descriptor(descriptor: &[u8]) -> bool {
+        let info = crate::parser::SignedNftDescriptor::parse(descriptor)
+            .and_then(|d| d.info())
+            .unwrap();
+        let verified = info.verified();
         crate::parser::ERC721Info::set_info(info).unwrap();
+        verified
+    }
+
+    /// Store the Ledger-signed Smol Joes descriptor, as
+    /// INS_PROVIDE_NFT_INFORMATION does.
+    #[cfg(feature = "erc721")]
+    fn provide_smol_joes_info() {
+        let descriptor = hex::decode(crate::parser::nft_info_test_vectors::SMOL_JOES).unwrap();
+        assert!(provide_nft_descriptor(&descriptor));
+    }
+
+    /// An NFT descriptor shaped like the JS SDK's provideNFTInformation
+    /// builds it: the production key and algorithm ids, and 70 random bytes
+    /// for a signature.
+    #[cfg(feature = "erc721")]
+    fn sdk_nft_descriptor(name: &[u8], contract: &[u8; 20]) -> Vec<u8> {
+        let mut descriptor = std::vec![1u8, 1, name.len() as u8];
+        descriptor.extend_from_slice(name);
+        descriptor.extend_from_slice(contract);
+        descriptor.extend_from_slice(&AVAX_C_CHAIN_MAINNET_ID.to_be_bytes());
+        descriptor.extend_from_slice(&[1, 1, 70]);
+        descriptor.extend((0..70u8).map(|i| i.wrapping_mul(97) ^ 0x5a));
+        descriptor
     }
 
     /// transferFrom(0xc3.., RECIPIENT, 1)
@@ -589,17 +618,17 @@ mod tests {
     #[cfg(feature = "erc721")]
     #[serial_test::file_serial(path)]
     fn erc721_call_with_native_value_shows_value() {
-        provide_nft_info(&EOA, AVAX_C_CHAIN_MAINNET_ID);
+        provide_smol_joes_info();
         let data = erc721_transfer_from_calldata();
 
         let hidden: Vec<_> = [
             (
                 "eip1559",
-                eip1559_tx(AVAX_C_CHAIN_MAINNET_ID, &EOA, HUNDRED_AVAX, &data),
+                eip1559_tx(AVAX_C_CHAIN_MAINNET_ID, &SMOL_JOES, HUNDRED_AVAX, &data),
             ),
             (
                 "legacy",
-                legacy_tx(AVAX_C_CHAIN_MAINNET_ID, &EOA, HUNDRED_AVAX, &data),
+                legacy_tx(AVAX_C_CHAIN_MAINNET_ID, &SMOL_JOES, HUNDRED_AVAX, &data),
             ),
         ]
         .into_iter()
@@ -840,7 +869,7 @@ mod tests {
     #[cfg(feature = "erc721")]
     #[serial_test::file_serial(path)]
     fn erc721_hidden_data_requires_blind_signing() {
-        provide_nft_info(&EOA, AVAX_C_CHAIN_MAINNET_ID);
+        provide_smol_joes_info();
 
         let safe = erc721_safe_transfer_from_calldata();
         let mut safe_trailing_word = safe.clone();
@@ -855,7 +884,7 @@ mod tests {
         // the ERC-721 parser refuses bytes past the 3-argument form...
         for data in [&safe_trailing_word, &safe_trailing_byte] {
             let mut contract = core::mem::MaybeUninit::uninit();
-            crate::parser::Address::from_bytes_into(&EOA, &mut contract).unwrap();
+            crate::parser::Address::from_bytes_into(&SMOL_JOES, &mut contract).unwrap();
             let contract = unsafe { contract.assume_init() };
             let mut call = core::mem::MaybeUninit::uninit();
             assert_eq!(
@@ -895,7 +924,7 @@ mod tests {
         let mut wrong = Vec::new();
         for flavour in FLAVOURS {
             for (name, data, expected) in &cases {
-                let res = requires_blind_signing_in(flavour, &EOA, 0, data);
+                let res = requires_blind_signing_in(flavour, &SMOL_JOES, 0, data);
                 if res != *expected {
                     wrong.push(std::format!("{flavour} {name}: {res:?}"));
                 }
@@ -914,7 +943,8 @@ mod tests {
             0xB9, 0x7E, 0xF9, 0xEF, 0x87, 0x34, 0xC7, 0x19, 0x04, 0xD8, 0x00, 0x2F, 0x8B, 0x6B,
             0xC6, 0x6D, 0xD9, 0xC4, 0x8A, 0x6E,
         ];
-        provide_nft_info(&USDC, AVAX_C_CHAIN_MAINNET_ID);
+        // a host can send an unsigned descriptor naming any contract
+        assert!(!provide_nft_descriptor(&sdk_nft_descriptor(b"Test", &USDC)));
 
         // approve(spender, MAX)
         let mut data = hex::decode("095ea7b3").unwrap();
@@ -930,26 +960,82 @@ mod tests {
         assert!(!pages.iter().any(|p| p.contains("ERC-721")), "{pages:#?}");
     }
 
-    // AVAX-17: the NFT descriptor is not authenticated, so its collection
-    // name is labelled as such.
+    /// The ERC-721 calls that show the collection name: transferFrom,
+    /// approve(RECIPIENT, 1) and setApprovalForAll(RECIPIENT, true)
+    #[cfg(feature = "erc721")]
+    fn erc721_named_calls() -> [(&'static str, Vec<u8>); 3] {
+        let mut approve = hex::decode("095ea7b3").unwrap();
+        approve.extend_from_slice(&[0; 12]);
+        approve.extend_from_slice(&RECIPIENT);
+        approve.extend_from_slice(&[0; 31]);
+        approve.push(1);
+
+        let mut approval_for_all = hex::decode("a22cb465").unwrap();
+        approval_for_all.extend_from_slice(&[0; 12]);
+        approval_for_all.extend_from_slice(&RECIPIENT);
+        approval_for_all.extend_from_slice(&[0; 31]);
+        approval_for_all.push(1);
+
+        [
+            ("transferFrom", erc721_transfer_from_calldata()),
+            ("approve", approve),
+            ("setApprovalForAll", approval_for_all),
+        ]
+    }
+
+    /// The page each named call shows the collection name on
+    #[cfg(feature = "erc721")]
+    fn collection_name_pages(titles: [&str; 3], name: &str) -> [String; 3] {
+        titles.map(|title| std::format!("\"{title}\": \"{name}\""))
+    }
+
+    // V-016: a Ledger-signed descriptor's collection name is shown under the
+    // plain titles.
     #[test]
     #[cfg(feature = "erc721")]
     #[serial_test::file_serial(path)]
-    fn nft_collection_name_marked_unverified() {
-        provide_nft_info(&EOA, AVAX_C_CHAIN_MAINNET_ID);
-
-        let pages = render_all(eip1559_tx(
-            AVAX_C_CHAIN_MAINNET_ID,
-            &EOA,
-            0,
-            &erc721_transfer_from_calldata(),
-        ));
-        assert!(
-            pages
-                .iter()
-                .any(|p| p == "\"NFT (unverified)\": \"Test\""),
-            "{pages:#?}"
+    fn nft_collection_name_shown() {
+        let expected = collection_name_pages(
+            ["Collection Name", "To Manage your", "To Manage ALL"],
+            "Smol Joes",
         );
+        for ((call, data), expected) in erc721_named_calls().into_iter().zip(expected) {
+            provide_smol_joes_info();
+            let pages = render_all(eip1559_tx(AVAX_C_CHAIN_MAINNET_ID, &SMOL_JOES, 0, &data));
+            assert!(pages.contains(&expected), "{call}: {pages:#?}");
+            assert!(!pages.iter().any(|p| p.contains("unverified")), "{call}");
+        }
+    }
+
+    // V-016: a descriptor Ledger did not sign (the JS SDK's, a tampered one)
+    // is still used, but its host-chosen name is titled as unverified.
+    #[test]
+    #[cfg(feature = "erc721")]
+    #[serial_test::file_serial(path)]
+    fn unverified_nft_collection_name_marked() {
+        let mut tampered = hex::decode(crate::parser::nft_info_test_vectors::SMOL_JOES).unwrap();
+        let name = 3;
+        tampered[name] = b'B';
+
+        let expected = |name| {
+            collection_name_pages(
+                ["NFT (unverified)", "NFT (unverified)", "ALL (unverified)"],
+                name,
+            )
+        };
+        for (descriptor, name) in [
+            (sdk_nft_descriptor(b"Smol Joes", &SMOL_JOES), "Smol Joes"),
+            (tampered, "Bmol Joes"),
+        ] {
+            for ((call, data), expected) in erc721_named_calls().into_iter().zip(expected(name)) {
+                assert!(!provide_nft_descriptor(&descriptor));
+                let pages =
+                    render_all(eip1559_tx(AVAX_C_CHAIN_MAINNET_ID, &SMOL_JOES, 0, &data));
+                assert!(pages.contains(&expected), "{call}: {pages:#?}");
+                assert!(!pages.iter().any(|p| p.contains("Collection Name")), "{call}");
+                assert!(!pages.iter().any(|p| p.contains("To Manage")), "{call}");
+            }
+        }
     }
 
     #[test]

@@ -93,7 +93,14 @@ impl DisplayableItem for BaseTransfer<'_> {
                 self.to.render_eth_address(message, page)
             }
             1 => {
-                let label = pic_str!(b"NFT (unverified)");
+                // the name is the host's unless Ledger signed it
+                let verified = pic_str!(b"Collection Name");
+                let unverified = pic_str!(b"NFT (unverified)");
+                let label: &[u8] = if nft_info.verified() {
+                    verified
+                } else {
+                    unverified
+                };
                 title[..label.len()].copy_from_slice(label);
 
                 nft_info.render_collection_name(message, page)
@@ -524,7 +531,14 @@ impl<'b> ERC721<'b> {
                 this.controller.render_eth_address(message, page)
             }
             1 => {
-                let label = pic_str!(b"NFT (unverified)");
+                // the name is the host's unless Ledger signed it
+                let verified = pic_str!(b"To Manage your");
+                let unverified = pic_str!(b"NFT (unverified)");
+                let label: &[u8] = if nft_info.verified() {
+                    verified
+                } else {
+                    unverified
+                };
                 title[..label.len()].copy_from_slice(label);
                 nft_info.render_collection_name(message, page)
             }
@@ -563,7 +577,14 @@ impl<'b> ERC721<'b> {
                 this.controller.render_eth_address(message, page)
             }
             1 => {
-                let label = pic_str!(b"ALL (unverified)");
+                // the name is the host's unless Ledger signed it
+                let verified = pic_str!(b"To Manage ALL");
+                let unverified = pic_str!(b"ALL (unverified)");
+                let label: &[u8] = if nft_info.verified() {
+                    verified
+                } else {
+                    unverified
+                };
                 title[..label.len()].copy_from_slice(label);
                 nft_info.render_collection_name(message, page)
             }

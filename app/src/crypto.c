@@ -21,6 +21,7 @@
 #include "cx.h"
 #include "cx_blake2b.h"
 #include "keys_def.h"
+#include "public_keys.h"
 #include "zxmacros.h"
 
 uint32_t hdPath[HDPATH_LEN_DEFAULT];
@@ -207,4 +208,22 @@ zxerr_t crypto_sign_avax(uint8_t *buffer, uint16_t signatureMaxlen, const uint8_
         default:
             return zxerr_unknown;
     }
+}
+
+// Checks a DER signature over the SHA-256 of an NFT descriptor
+// (INS_PROVIDE_NFT_INFORMATION) against Ledger's NFT metadata key, the key
+// app-ethereum checks the same descriptors with (public_keys.h). Called from
+// Rust before the descriptor's collection name is trusted.
+bool crypto_verify_nft_metadata(const uint8_t *hash, const uint8_t *sig, uint16_t sig_len) {
+    if (hash == NULL || sig == NULL || sig_len == 0) {
+        return false;
+    }
+
+    cx_ecfp_public_key_t nft_key = {0};
+    if (cx_ecfp_init_public_key_no_throw(CX_CURVE_256K1, LEDGER_NFT_METADATA_PUBLIC_KEY,
+                                         sizeof(LEDGER_NFT_METADATA_PUBLIC_KEY), &nft_key) != CX_OK) {
+        return false;
+    }
+
+    return cx_ecdsa_verify_no_throw(&nft_key, hash, CX_SHA256_SIZE, sig, sig_len);
 }

@@ -88,10 +88,15 @@ pub use validator::*;
 pub use warp_message::*;
 
 #[cfg(feature = "erc721")]
-pub use coreth::{data::ERC721Info, nft_info::NftInfo};
+pub use coreth::{
+    data::ERC721Info,
+    nft_info::{NftInfo, SignedNftDescriptor},
+};
 
 #[cfg(test)]
 pub(crate) use coreth::native::rlp_test_utils;
+#[cfg(all(test, feature = "erc721"))]
+pub(crate) use coreth::nft_info::tests as nft_info_test_vectors;
 
 ///This trait defines the interface useful in the UI context
 /// so that all the different OperationTypes or other items can handle their own UI
