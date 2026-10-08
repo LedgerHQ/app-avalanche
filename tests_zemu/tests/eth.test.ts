@@ -33,16 +33,57 @@ const blindSignOptions = (model: any) => {
   }
 }
 
-type NftInfo = {
-  token_address: string
-  token_name: string
-  chain_id: number
+// INS_PROVIDE_NFT_INFORMATION. The device keeps every well-formed NFT
+// descriptor for the next ERC-721 review. When Ledger's NFT metadata key signed
+// it, the review titles its collection name "Collection Name"; otherwise (the
+// JS SDK's provideNFTInformation sends a random signature) "NFT (unverified)".
+// A malformed descriptor is answered with DataInvalid (0x6984).
+const CLA_ETH = 0xe0
+const INS_PROVIDE_NFT_INFORMATION = 0x14
+const SW_OK = 0x9000
+
+// The Smol Joes collection on the C-Chain (43114) and its descriptor exactly as
+// Ledger's NFT metadata service serves it:
+// https://nft.api.live.ledger.com/v1/ethereum/43114/contracts/0xc70df87e1d98f6a531c8e324c9bcec6fc82b5e8d
+// type | version | name length | name | contract | chain id | key id |
+// algorithm id | signature length | DER signature
+const SMOL_JOES_CONTRACT = 'c70df87e1d98f6a531c8e324c9bcec6fc82b5e8d'
+const SMOL_JOES_NFT_DESCRIPTOR = Buffer.from(
+  '010109536d6f6c204a6f6573' +
+    SMOL_JOES_CONTRACT +
+    '000000000000a86a' +
+    '0101' +
+    '47' +
+    '3045022001c39a2422e6026be1283bf9fbb287373024c62a1fe76eb729fedaf6fce19993022100dc618cb328093bf01ab59f1857dfd4a84d3e5ab5307cdd345b268b73abbbedb0',
+  'hex',
+)
+
+// EIP-1559 ERC-721 safeTransferFrom(0x7794.., 0x5d49.., 513) on Smol Joes, C-Chain
+const ERC721_SAFE_TRANSFER_FROM_SMOL_JOES = Buffer.from(
+  '02f88f82a86a198459682f00850b68b3c16882caf094c70df87e1d98f6a531c8e324c9bcec6fc82b5e8d80b86442842e0e00000000000000000000000077944eed8d4a00c8bd413f77744751a4d04ea34a0000000000000000000000005d4994bccdd28afbbc6388fbcaaec69dd44c04560000000000000000000000000000000000000000000000000000000000000201c0',
+  'hex',
+)
+
+// Send `descriptor` as INS_PROVIDE_NFT_INFORMATION and return the status word.
+// It goes straight to Speculos, so a refused descriptor's status word is
+// returned instead of an exception from the client transport.
+async function provideNftDescriptor(sim: Zemu, descriptor: Buffer): Promise<number> {
+  const apdu = Buffer.concat([Buffer.from([CLA_ETH, INS_PROVIDE_NFT_INFORMATION, 0x00, 0x00, descriptor.length]), descriptor])
+  const resp = await fetch(`http://127.0.0.1:${(sim as any).speculosApiPort}/apdu`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data: apdu.toString('hex') }),
+  })
+  const reply = Buffer.from(((await resp.json()) as { data: string }).data, 'hex')
+  return reply.readUInt16BE(reply.length - 2)
 }
 
 type TestData = {
   name: string
   op: Buffer
-  nft_info: NftInfo | undefined
+  // Ledger-signed NFT descriptor provided before the transaction, for its
+  // ERC-721 review
+  nft_info: Buffer | undefined
   // Set when the transaction targets a non-AVAX EVM chain (chain_id not in
   // {43114, 43113, 43112}). On the device the value field will render as
   // "???" and signing requires blind-sign mode to be enabled.
@@ -105,32 +146,21 @@ const SIGN_TEST_DATA: TestData[] = [
     foreign_chain: true,
   },
   {
-    // EIP-1559 ERC-721 safeTransferFrom on chain_id 2 (foreign)
+    // EIP-1559 ERC-721 safeTransferFrom on Smol Joes, C-Chain (43114): a clear
+    // signed review showing the collection name from the signed descriptor
     name: 'erc721_safe_transfer_from',
-    op: Buffer.from(
-      '02f88d02198459682f00850b68b3c16882caf09434bc797f40df0445c8429d485232874b1556172880b86442842e0e00000000000000000000000077944eed8d4a00c8bd413f77744751a4d04ea34a0000000000000000000000005d4994bccdd28afbbc6388fbcaaec69dd44c04560000000000000000000000000000000000000000000000000000000000000201c0',
-      'hex',
-    ),
-    nft_info: {
-      token_address: '34bc797f40df0445c8429d485232874b15561728',
-      token_name: 'Lucid',
-      chain_id: 2,
-    },
-    foreign_chain: true,
+    op: ERC721_SAFE_TRANSFER_FROM_SMOL_JOES,
+    nft_info: SMOL_JOES_NFT_DESCRIPTOR,
   },
   {
-    // EIP-1559 ERC-721 setApprovalForAll on chain_id 3 (foreign)
+    // EIP-1559 ERC-721 setApprovalForAll(0x1e00.., true) on Smol Joes, C-Chain
+    // (43114)
     name: 'erc721_approve_for_all',
     op: Buffer.from(
-      '02f86f0382034a8459682f00850322d538d182b67094bd3f82a81c3f74542736765ce4fd579d177b6bc580b844a22cb4650000000000000000000000001e0049783f008a0085193e00003d00cd54003c710000000000000000000000000000000000000000000000000000000000000001c0',
+      '02f87182a86a82034a8459682f00850322d538d182b67094c70df87e1d98f6a531c8e324c9bcec6fc82b5e8d80b844a22cb4650000000000000000000000001e0049783f008a0085193e00003d00cd54003c710000000000000000000000000000000000000000000000000000000000000001c0',
       'hex',
     ),
-    nft_info: {
-      token_address: 'bd3f82a81c3f74542736765ce4fd579d177b6bc5',
-      token_name: 'PG JIRAVERSE',
-      chain_id: 2,
-    },
-    foreign_chain: true,
+    nft_info: SMOL_JOES_NFT_DESCRIPTOR,
   },
   {
     name: 'erc20_transfer_usdt',
@@ -246,15 +276,16 @@ describe.each(models)('EthereumTx [%s]; sign', function (m) {
 
       const currentScreen = await sim.snapshot()
 
-      // TODO: Investigate later required changes to pass token NftInfo
-      // to application for ERC721/ERC20 transfers
+      // The descriptor Ledger's NFT metadata service signed is sent as is,
+      // so the review shows the verified "Collection Name" titles.
       const nft = data.nft_info
       if (nft !== undefined) {
-        const provide_resp = await app.provideNFTInformation(nft.token_name, nft.token_address, BigInt(nft.chain_id))
-        expect(provide_resp).toEqual(true)
+        expect(await provideNftDescriptor(sim, nft)).toEqual(SW_OK)
       }
 
-      const respReq = app.signEVMTransaction(ETH_DERIVATION, msg.toString('hex'))
+      // With a descriptor provided, null skips hw-app-eth's own resolution so
+      // nothing reaches the device between it and the request that uses it.
+      const respReq = app.signEVMTransaction(ETH_DERIVATION, msg.toString('hex'), nft !== undefined ? null : undefined)
       await sim.waitUntilScreenIsNot(currentScreen, 100000)
       if (data.nano_clicks !== undefined && !isTouchDevice(m.name)) {
         const nav = new ClickNavigation([data.nano_clicks, 0])
@@ -348,6 +379,111 @@ describe.each(models)('EthereumTx [%s]; sign', function (m) {
     }
 
     // It must have refused to sign (rejected), never produced a signature.
+    await expect(signReq).rejects.toBeDefined()
+  })
+})
+
+describe.each(models)('ERC-721 NFT info [%s]', function (m) {
+  // Start signing the Smol Joes safeTransferFrom with the NFT info `provide`
+  // stored, walk its review up to the collection name screen without
+  // approving, and return every text shown up to there.
+  async function reviewCollectionName(provide: (sim: Zemu, app: AvalancheApp) => Promise<void>): Promise<string[]> {
+    const sim = new Zemu(m.path)
+    // signEVMTransaction is deferred (IO_ASYNCH_REPLY) while the review shows
+    // and only settles when the container closes.
+    // Definite assignment: it is always set in the try below before any use.
+    let signReq!: Promise<unknown>
+    try {
+      await sim.start(defaultOptions(m)) // blind signing OFF
+      const app = new AvalancheApp(sim.getTransport())
+
+      await provide(sim, app)
+
+      const currentScreen = await sim.snapshot()
+      // null skips hw-app-eth's own resolution, so nothing reaches the device
+      // between the NFT info and the request that uses it
+      signReq = app.signEVMTransaction(ETH_DERIVATION, ERC721_SAFE_TRANSFER_FROM_SMOL_JOES.toString('hex'), null)
+      signReq.catch(() => {}) // pre-attach: avoid unhandled rejection on teardown
+      await sim.waitUntilScreenIsNot(currentScreen, 20000)
+
+      // clear signed: no blind-signing warning first, so walk until the
+      // collection name's title, taking no snapshots and approving nothing
+      await sim.navigateUntilText('.', '', 'unverified|Collection Name', true, false, 0, 20000, false)
+      return (await sim.getEvents()).map((e: { text: string }) => e.text)
+    } finally {
+      await sim.close()
+    }
+  }
+
+  // A descriptor Ledger did not sign is still kept for the next ERC-721 review,
+  // but its host-chosen collection name is titled as unverified.
+  test.concurrent('labels NFT descriptors not signed by Ledger as unverified', async function () {
+    // one byte of the name flipped: "Smol Joes" becomes "Rmol Joes"
+    const forged = Buffer.from(SMOL_JOES_NFT_DESCRIPTOR)
+    forged[3] ^= 0x01
+
+    const shown = await reviewCollectionName(async sim => {
+      expect(await provideNftDescriptor(sim, forged)).toEqual(SW_OK)
+    })
+
+    expect(shown.some(t => /unverified/i.test(t))).toBe(true)
+    expect(shown.some(t => /Rmol Joes/.test(t))).toBe(true)
+    expect(shown.some(t => /Collection Name/i.test(t))).toBe(false)
+  })
+
+  // What hosts built on the JS SDK do: provideNFTInformation(name, address,
+  // chainId) sends the descriptor with a random signature. It is accepted, and
+  // the review titles the name as unverified.
+  test.concurrent("labels the JS SDK's NFT info as unverified", async function () {
+    const shown = await reviewCollectionName(async (_sim, app) => {
+      expect(await app.provideNFTInformation('Smol Joes', `0x${SMOL_JOES_CONTRACT}`, BigInt(43114))).toEqual(true)
+    })
+
+    expect(shown.some(t => /unverified/i.test(t))).toBe(true)
+    expect(shown.some(t => /Smol Joes/.test(t))).toBe(true)
+    expect(shown.some(t => /Collection Name/i.test(t))).toBe(false)
+  })
+
+  // The descriptor Ledger's NFT metadata service signed gets the plain title.
+  test.concurrent('titles Ledger-signed NFT descriptors "Collection Name"', async function () {
+    const shown = await reviewCollectionName(async sim => {
+      expect(await provideNftDescriptor(sim, SMOL_JOES_NFT_DESCRIPTOR)).toEqual(SW_OK)
+    })
+
+    expect(shown.some(t => /Collection Name/i.test(t))).toBe(true)
+    expect(shown.some(t => /Smol Joes/.test(t))).toBe(true)
+    expect(shown.some(t => /unverified/i.test(t))).toBe(false)
+  })
+
+  // A malformed descriptor (here one trailing byte) is refused, and drops the
+  // descriptor provided before it: the transfer is then a contract call the
+  // device cannot decode, which it refuses without blind signing, instead of a
+  // review naming Smol Joes.
+  test.concurrent('rejects malformed NFT descriptors', async function () {
+    const sim = new Zemu(m.path)
+    // Definite assignment: it is always set in the try below before any use.
+    let signReq!: Promise<unknown>
+    try {
+      await sim.start(defaultOptions(m)) // blind signing OFF
+      const app = new AvalancheApp(sim.getTransport())
+
+      const malformed = Buffer.concat([SMOL_JOES_NFT_DESCRIPTOR, Buffer.from([0x00])])
+
+      expect(await provideNftDescriptor(sim, SMOL_JOES_NFT_DESCRIPTOR)).toEqual(SW_OK)
+      // the C dispatcher reports a refused ETH request as APDU_CODE_DATA_INVALID
+      expect(await provideNftDescriptor(sim, malformed)).toEqual(0x6984)
+
+      signReq = app.signEVMTransaction(ETH_DERIVATION, ERC721_SAFE_TRANSFER_FROM_SMOL_JOES.toString('hex'), null)
+      signReq.catch(() => {}) // pre-attach: avoid unhandled rejection on teardown
+
+      // Touch devices render "This transaction cannot be clear-signed"; Nano
+      // devices render "Blind signing must be enabled in Settings".
+      const warning = isTouchDevice(m.name) ? /clear-signed/i : /Blind signing must be/i
+      await sim.waitForText(warning, 20000)
+    } finally {
+      await sim.close()
+    }
+
     await expect(signReq).rejects.toBeDefined()
   })
 })
