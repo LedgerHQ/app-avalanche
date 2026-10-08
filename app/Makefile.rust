@@ -33,9 +33,16 @@ endif
 
 NBGL_TARGETS := TARGET_STAX TARGET_FLEX TARGET_APEX_P
 ifeq ($(TARGET_NAME),$(filter $(TARGET_NAME), $(NBGL_TARGETS)))
+# app icon shown by app-ethereum's review screens: 64px on Stax/Flex, and
+# the 48px icon on Apex P, whose screen (and Ledger's icon check) expects it
+ifeq ($(TARGET_NAME),TARGET_APEX_P)
+DEFINES += ICONGLYPH=C_icon_apex_p_48
+DEFINES += ICONBITMAP=C_icon_apex_p_48
+else
 DEFINES += ICONGLYPH=C_icon_stax_64
 DEFINES += ICONBITMAP=C_icon_stax_64
 DEFINES += ICONGLYPH_SMALL=C_icon_stax_32
+endif
 RUST_TARGET_NAME := TARGET_STAX
 endif
 
