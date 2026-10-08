@@ -559,10 +559,8 @@ describe.each(models)('Ethereum Personal Message [%s] - misc', function (m) {
 
       const respReq = app.signPersonalMessage(ETH_DERIVATION, msgData.toString('hex'))
 
-      if (m.name === 'nanos') {
-        await sim.navigateAndCompareSnapshots('.', testcase, [6, -4, 3, 0, 0])
-      } else if (m.name === 'nanox' || m.name === 'nanosp') {
-        await sim.navigateAndCompareSnapshots('.', testcase, [9, -4, 3, 0, 0])
+      if (m.name === 'nanox' || m.name === 'nanosp') {
+        await sim.navigateAndCompareSnapshots('.', testcase, [7, -4, 6, 0])
       } else {
         // skip menu is not available for larger devices
         // like stax and flex
@@ -583,8 +581,7 @@ describe.each(models)('Ethereum Personal Message [%s] - misc', function (m) {
   })
 })
 
-// Eip712 transactions are not supported by nanos
-describe.each(models.filter(m => m.name !== 'nanos'))('EIP712 [%s]; sign', function (m) {
+describe.each(models)('EIP712 [%s]; sign', function (m) {
   test.concurrent('Eip712Hash', async function () {
     const sim = new Zemu(m.path)
     try {
@@ -670,7 +667,7 @@ const EIP712_PERMIT = {
   },
 }
 
-describe.each(models.filter(m => m.name !== 'nanos'))('EIP712 filtering [%s]', function (m) {
+describe.each(models)('EIP712 filtering [%s]', function (m) {
   test.concurrent('rejects filters not signed by Ledger', async function () {
     // evm-tools is a dependency of hw-app-eth, not of this package
     const requireFromEth = createRequire(require.resolve('@ledgerhq/hw-app-eth'))

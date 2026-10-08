@@ -291,9 +291,11 @@ describe.each(REJECTION_REGRESSION_MODELS)('signHash suffix during the review [%
       const review = sendRaw(0x01, Buffer.concat([signingRoot(), hash]))
       await sim.waitUntilScreenIsNot(sim.getMainMenuSnapshot())
 
-      // nobody touched the device: no signature, only an error status
+      // nobody touched the device: no signature. Since API level 27 the SDK
+      // refuses any command while a reply is pending (SWO_COMMAND_NOT_ACCEPTED);
+      // the app's own approval check would answer 0x6400 behind it.
       const suffixReply = await sendRaw(0x03, pathSuffix(0, 0))
-      expect(suffixReply).toEqual('6400')
+      expect(suffixReply).toEqual('6901')
 
       await review
     } finally {
