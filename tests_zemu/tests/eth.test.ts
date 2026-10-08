@@ -457,6 +457,8 @@ describe.each(models.filter(m => m.name !== 'nanos'))('EIP712 [%s]; sign', funct
 
       // Put the app in expert mode
       await sim.toggleExpertMode()
+      // A bare EIP-712 hash is blind signing
+      await sim.toggleBlindSigning()
 
       const testcase = `${m.prefix.toLowerCase()}-eth-sign-eip712_hashed_message`
 
@@ -465,7 +467,8 @@ describe.each(models.filter(m => m.name !== 'nanos'))('EIP712 [%s]; sign', funct
       const respReq = app.signEIP712HashedMessage(ETH_DERIVATION, EIP712_TRANSACTION.domain_hash, EIP712_TRANSACTION.msg_hash)
       await sim.waitUntilScreenIsNot(currentScreen, 100000)
       if (isTouchDevice(m.name)) {
-        await sim.compareSnapshotsAndApprove('.', testcase)
+        // accept the "Blind signing ahead" warning first
+        await sim.compareSnapshotsAndApprove('.', testcase, true, 0, 1500, true)
       } else {
         const nav = new ClickNavigation([5, 0])
         await sim.navigateAndCompareSnapshots('.', testcase, nav.schedule)
@@ -478,6 +481,21 @@ describe.each(models.filter(m => m.name !== 'nanos'))('EIP712 [%s]; sign', funct
       expect(resp).toHaveProperty('s')
       expect(resp).toHaveProperty('r')
       expect(resp).toHaveProperty('v')
+    } finally {
+      await sim.close()
+    }
+  })
+
+  // EIP-712 hash signing is tied to the blind-signing setting
+  test.concurrent('Eip712Hash needs blind signing', async function () {
+    const sim = new Zemu(m.path)
+    try {
+      await sim.start(defaultOptions(m))
+      const app = new AvalancheApp(sim.getTransport())
+
+      await expect(
+        app.signEIP712HashedMessage(ETH_DERIVATION, EIP712_TRANSACTION.domain_hash, EIP712_TRANSACTION.msg_hash),
+      ).rejects.toThrow(/0x6a80/i)
     } finally {
       await sim.close()
     }
@@ -538,6 +556,9 @@ describe.each(models.filter(m => m.name !== 'nanos'))('EIP712 filtering [%s]', f
     const sim = new Zemu(m.path)
     try {
       await sim.start(defaultOptions(m))
+      // With blind signing on, an unfiltered message would be accepted, so the
+      // rejection can only come from the filter signature check.
+      await sim.toggleBlindSigning()
       const eth = new Eth(sim.getTransport() as any, undefined, loadConfig)
 
       await expect(eth.signEIP712Message(ETH_DERIVATION, EIP712_PERMIT as any)).rejects.toThrow(/0x6a80/i)
