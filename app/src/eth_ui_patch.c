@@ -1,3 +1,4 @@
+#include "bolos_target.h"
 #include "os_pic.h"
 #include "os_utils.h"
 
