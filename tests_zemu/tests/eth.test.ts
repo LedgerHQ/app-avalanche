@@ -432,16 +432,21 @@ describe.each(models)('ERC-721 NFT info [%s]', function (m) {
   })
 
   // What hosts built on the JS SDK do: provideNFTInformation(name, address,
-  // chainId) sends the descriptor with a random signature. It is accepted, and
-  // the review titles the name as unverified.
-  test.concurrent("labels the JS SDK's NFT info as unverified", async function () {
-    const shown = await reviewCollectionName(async (_sim, app) => {
+  // chainId). The device must keep accepting it. The SDK writes the address
+  // and the signature into a copy of its buffer (`.copy(new Uint8Array(buf))`),
+  // so the descriptor it sends carries a zero address and a zero signature:
+  // it never matches a contract, and no ERC-721 review uses it. Only the
+  // acceptance is checked here; the unverified title is covered above with a
+  // correctly built unsigned descriptor.
+  test.concurrent("accepts the JS SDK's NFT info", async function () {
+    const sim = new Zemu(m.path)
+    try {
+      await sim.start(defaultOptions(m))
+      const app = new AvalancheApp(sim.getTransport())
       expect(await app.provideNFTInformation('Smol Joes', `0x${SMOL_JOES_CONTRACT}`, BigInt(43114))).toEqual(true)
-    })
-
-    expect(shown.some(t => /unverified/i.test(t))).toBe(true)
-    expect(shown.some(t => /Smol Joes/.test(t))).toBe(true)
-    expect(shown.some(t => /Collection Name/i.test(t))).toBe(false)
+    } finally {
+      await sim.close()
+    }
   })
 
   // The descriptor Ledger's NFT metadata service signed gets the plain title.
