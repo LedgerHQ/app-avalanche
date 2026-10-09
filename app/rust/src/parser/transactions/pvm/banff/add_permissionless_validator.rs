@@ -528,7 +528,7 @@ mod tests {
                 .locktime,
             87654321
         );
-        assert_eq!(tx.delegator_rewards_owner.threshold, 1);
+        assert_eq!(tx.delegator_rewards_owner.threshold, 0);
         assert_eq!(tx.validator_rewards_owner.threshold, 1);
         assert!(matches!(tx.signer, BLSSigner::Proof(_)));
 

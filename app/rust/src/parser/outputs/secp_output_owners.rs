@@ -25,9 +25,12 @@ use crate::{
     checked_add,
     handlers::handle_ui_message,
     parser::{
-        outputs::{check_locktime, render_locktime, render_threshold, shows_threshold},
-        Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN,
-        MAX_ADDRESSES, MAX_ADDRESS_ENCODED_LEN,
+        outputs::{
+            address_items, check_locktime, check_threshold, render_locktime, render_no_owner,
+            render_threshold, shows_threshold,
+        },
+        Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES,
+        MAX_ADDRESS_ENCODED_LEN,
     },
 };
 
@@ -99,13 +102,8 @@ impl<'b> FromBytes<'b> for SECPOutputOwners<'b> {
         let addresses =
             bytemuck::try_cast_slice(addresses).map_err(|_| ParserError::InvalidAddressLength)?;
 
-        // threshold 0 is rejected outright. With no addresses avalanchego
-        // accepts it and anyone can claim what these owners control (rewards,
-        // a subnet) with no signature, while the review shows no owner at
-        // all; with addresses it is not a valid owner set at all.
-        if threshold == 0 || threshold as usize > addresses.len() {
-            return Err(ParserError::InvalidThreshold.into());
-        }
+        // threshold 0 is accepted and shown, see check_threshold
+        check_threshold(threshold, addresses.len())?;
 
         // the locktime is shown as a date
         check_locktime(locktime)?;
@@ -156,7 +154,7 @@ impl SECPOutputOwners<'_> {
     ) -> Result<u8, ViewError> {
         use bolos::{pic_str, PIC};
 
-        let addr_items = self.addresses.len() as u8;
+        let addr_items = address_items(self.addresses.len());
         let mut item_index = item_n;
 
         if self.locktime > 0 {
@@ -169,9 +167,17 @@ impl SECPOutputOwners<'_> {
         }
 
         if item_index < addr_items {
+            if self.addresses.is_empty() {
+                // Threshold 0 with no address: anyone can claim what these
+                // owners control (rewards, a subnet) with no signature. It
+                // used to contribute no screen at all.
+                let anyone = pic_str!(b"Anyone");
+                return render_no_owner(address_label, anyone, title, message, page);
+            }
             title[..address_label.len()].copy_from_slice(address_label);
             self.render_address_with_hrp(hrp, item_index as usize, message, page)
-        } else if item_index == addr_items && shows_threshold(self.addresses.len()) {
+        } else if item_index == addr_items && shows_threshold(self.threshold, self.addresses.len())
+        {
             render_threshold(self.threshold, self.addresses.len(), title, message, page)
         } else {
             Err(ViewError::NoData)
@@ -181,15 +187,16 @@ impl SECPOutputOwners<'_> {
 
 impl DisplayableItem for SECPOutputOwners<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        // show an item for each address in the list
-        let items = self.addresses.len() as u8;
+        // show an item for each address in the list, or one saying anyone
+        // can act for these owners when there is none
+        let items = address_items(self.addresses.len());
         // show locktime only if it is higher than zero, and the threshold only
         // with several addresses, that is why we sum up these booleans
         checked_add!(
             ViewError::Unknown,
             items,
             (self.locktime > 0) as u8,
-            shows_threshold(self.addresses.len()) as u8
+            shows_threshold(self.threshold, self.addresses.len()) as u8
         )
     }
 
@@ -225,33 +232,67 @@ mod tests {
     }
 
     #[test]
-    fn owners_with_threshold_zero_are_rejected() {
-        use crate::parser::tx_builder::{owners, RECIPIENT};
+    fn owners_with_threshold_zero_are_accepted_and_shown() {
+        use crate::parser::tx_builder::{owners, render_all, RECIPIENT};
+        use std::prelude::v1::*;
 
-        // No addresses means anyone can claim what they own (rewards, a
-        // subnet) with no signature; with addresses it is not valid at all.
-        for raw in [owners(0, 0, &[]), owners(0, 0, &[RECIPIENT])] {
+        // No addresses: anyone can claim what they own (rewards, a subnet)
+        // with no signature. Accepted as it always was, with a screen saying
+        // so where it used to have none.
+        let raw = owners(0, 0, &[]);
+        let (_, empty) = SECPOutputOwners::from_bytes(&raw).unwrap();
+        assert_eq!(render_all(&empty), ["Owner address: Anyone"]);
+        let mut title = [0; 20];
+        let mut message = [0; 40];
+        empty
+            .render_item_with_label("fuji", b"Rewards to", 0, &mut title, &mut message, 0)
+            .unwrap();
+        assert!(title.starts_with(b"Rewards to\0"));
+        assert!(message.starts_with(b"Anyone\0"));
+
+        // and with a locktime, that too
+        let raw = owners(4_102_444_800, 0, &[]);
+        let (_, locked) = SECPOutputOwners::from_bytes(&raw).unwrap();
+        assert_eq!(
+            render_all(&locked),
+            ["Locktime: 2100-01-01 00:00:00 UTC", "Owner address: Anyone"]
+        );
+
+        // With addresses avalanchego refuses it; accepted as it was, with
+        // its threshold shown.
+        let raw = owners(0, 0, &[RECIPIENT]);
+        let (_, zero_of_one) = SECPOutputOwners::from_bytes(&raw).unwrap();
+        let screens = render_all(&zero_of_one);
+        assert_eq!(screens.len(), 2, "{:#?}", screens);
+        assert_eq!(screens[1], "Threshold: 0 of 1");
+
+        // a threshold above the number of addresses is still refused
+        for raw in [owners(0, 1, &[]), owners(0, 2, &[RECIPIENT])] {
             let err = SECPOutputOwners::from_bytes(&raw).unwrap_err();
             assert_eq!(err, ParserError::InvalidThreshold.into());
         }
-
-        assert!(SECPOutputOwners::from_bytes(&owners(0, 1, &[RECIPIENT])).is_ok());
     }
 
     #[test]
-    fn empty_rewards_owner_rejects_the_transaction() {
+    fn empty_rewards_owner_is_shown() {
         use crate::parser::tx_builder::*;
-        use crate::parser::Transaction;
+        use std::prelude::v1::*;
 
         // The rewards owner contributed no screen at all, so the review looked
         // the same as one paying rewards to the user.
-        let ins = [input(1, &FUJI_AVAX, 100_000_000_000)];
+        let ins = [input(1, &FUJI_AVAX, 3_000_000_000_000)];
         let stake = [out(2_000_000_000_000, CHANGE)];
         let tx = add_delegator(&[], &ins, &stake, owners(0, 0, &[]));
+        let shown = screens(&tx, None);
         assert_eq!(
-            Transaction::new(&tx).unwrap_err(),
-            ParserError::InvalidThreshold
+            shown
+                .iter()
+                .filter(|s| s.starts_with("Rewards to: "))
+                .collect::<Vec<_>>(),
+            ["Rewards to: Anyone"]
         );
+        let to_user = add_delegator(&[], &ins, &stake, owners(0, 1, &[CHANGE]));
+        assert_ne!(shown, screens(&to_user, None));
     }
 
     #[test]

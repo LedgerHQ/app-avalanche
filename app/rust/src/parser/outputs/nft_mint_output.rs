@@ -25,9 +25,11 @@ use crate::{
     checked_add,
     handlers::handle_ui_message,
     parser::{
-        outputs::{check_locktime, render_locktime},
-        u32_to_str, Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN,
-        MAX_ADDRESSES, U64_FORMATTED_SIZE,
+        outputs::{
+            address_items, check_locktime, check_threshold, render_locktime, render_no_owner,
+        },
+        u32_to_str, Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES,
+        U64_FORMATTED_SIZE,
     },
 };
 
@@ -82,11 +84,8 @@ impl<'b> FromBytes<'b> for NFTMintOutput<'b> {
         let addresses =
             bytemuck::try_cast_slice(addresses).map_err(|_| ParserError::InvalidAddressLength)?;
 
-        // threshold 0 is rejected as in SECPTransferOutput: with no addresses
-        // anyone can spend or mint, with addresses it is not valid on-chain.
-        if threshold == 0 || threshold as usize > addresses.len() {
-            return Err(ParserError::InvalidThreshold.into());
-        }
+        // threshold 0 is accepted and shown, see check_threshold
+        check_threshold(threshold, addresses.len())?;
 
         // the locktime is shown as a date
         check_locktime(locktime)?;
@@ -107,12 +106,13 @@ impl<'b> FromBytes<'b> for NFTMintOutput<'b> {
 
 impl DisplayableItem for NFTMintOutput<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        // output-type, group_id, threshold and addresses
+        // output-type, group_id, threshold and addresses (or the "anyone can
+        // mint" screen when there is none)
         // do not show locktime if it is 0
         checked_add!(
             ViewError::Unknown,
             3u8,
-            self.addresses.len() as _,
+            address_items(self.addresses.len()),
             (self.locktime > 0) as u8
         )
     }
@@ -144,7 +144,7 @@ impl NFTMintOutput<'_> {
         use bolos::{pic_str, PIC};
 
         let mut buffer = [0; U64_FORMATTED_SIZE + 2];
-        let addr_item_n = self.num_items()? - self.addresses.len() as u8;
+        let addr_item_n = self.num_items()? - address_items(self.addresses.len());
         let shows_locktime = self.locktime > 0;
         // Gets the page at which this field is displayed, by summing the boolean
         // directly since it offsets the pages by 1 if present
@@ -178,6 +178,15 @@ impl NFTMintOutput<'_> {
                 handle_ui_message(buffer, message, page)
             }
 
+            // Threshold 0 with no address: anyone can mint in the group with
+            // no signature.
+            x @ 3.. if x == addr_item_n && self.addresses.is_empty() => render_no_owner(
+                pic_str!(b"Address"),
+                pic_str!(b"Anyone can mint"),
+                title,
+                message,
+                page,
+            ),
             x @ 3.. if x >= addr_item_n => {
                 let idx = x - addr_item_n;
                 if let Some(data) = self.addresses.get(idx as usize) {
@@ -199,7 +208,7 @@ mod tests {
     use super::*;
 
     const DATA: &[u8] = &[
-        0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 56, 0, 0, 0, 1, 0, 0, 0, 1, 22, 54, 119, 75,
+        0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 56, 0, 0, 0, 0, 0, 0, 0, 1, 22, 54, 119, 75,
         103, 131, 141, 236, 22, 225, 106, 182, 207, 172, 178, 27, 136, 195, 168, 97,
     ];
 
@@ -209,7 +218,7 @@ mod tests {
         assert_eq!(out.locktime, 56);
         assert_eq!(out.group_id, 0);
         assert_eq!(out.addresses.len(), 1);
-        assert_eq!(out.threshold, 1);
+        assert_eq!(out.threshold, 0);
         assert_eq!(out.addresses[0][..], DATA[(DATA.len() - 20)..]);
     }
 }

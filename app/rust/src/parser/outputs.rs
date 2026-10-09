@@ -91,10 +91,50 @@ where
         })
 }
 
+/// Refuse an owner set whose threshold is above its number of addresses,
+/// which nobody could ever spend, as develop always did.
+///
+/// Threshold 0 is accepted. With no addresses it is valid on-chain and means
+/// that anyone can spend (or mint, or claim) without a signature, so the
+/// owner set renders an explicit "anyone" screen instead of an address (see
+/// address_items). With addresses avalanchego refuses it as unoptimized; it
+/// is shown with its "0 of N" Threshold screen.
+pub(crate) fn check_threshold(threshold: u32, num_addresses: usize) -> Result<(), ParserError> {
+    if threshold as usize > num_addresses {
+        return Err(ParserError::InvalidThreshold);
+    }
+    Ok(())
+}
+
+/// Screens an owner set gives its addresses: one per address, or a single
+/// "anyone" screen when it has none (threshold 0, see check_threshold).
+/// Without that screen an output anyone can spend showed an amount with no
+/// recipient, and an empty rewards or subnet owner showed nothing at all.
+///
+/// The number of addresses is at most MAX_ADDRESSES, so it fits in a u8.
+pub(crate) fn address_items(num_addresses: usize) -> u8 {
+    num_addresses.max(1) as u8
+}
+
+/// Render the screen standing in for the addresses of an owner set that has
+/// none: titled `label`, as an address screen would be, showing `text`.
+pub(crate) fn render_no_owner(
+    label: &[u8],
+    text: &[u8],
+    title: &mut [u8],
+    message: &mut [u8],
+    page: u8,
+) -> Result<u8, ViewError> {
+    title[..label.len()].copy_from_slice(label);
+    handle_ui_message(text, message, page)
+}
+
 /// Whether an owner set needs a Threshold screen: with a single address the
-/// only valid threshold is 1, so the screen would say nothing.
-pub(crate) fn shows_threshold(num_addresses: usize) -> bool {
-    num_addresses > 1
+/// only threshold avalanchego accepts is 1, so the screen would say nothing,
+/// unless the threshold is 0. With no address there is no threshold to show
+/// (it is 0, and the "anyone" screen says so).
+pub(crate) fn shows_threshold(threshold: u32, num_addresses: usize) -> bool {
+    num_addresses > 1 || (num_addresses == 1 && threshold == 0)
 }
 
 /// Render the "Threshold" screen of an owner set as "<threshold> of <n>".
@@ -535,7 +575,7 @@ mod tests {
 
     const DATA: &[u8] = &[
         1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-        1, 1, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 56, 0, 0, 0, 1, 0, 0, 0, 1, 22, 54,
+        1, 1, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 56, 0, 0, 0, 0, 0, 0, 0, 1, 22, 54,
         119, 75, 103, 131, 141, 236, 22, 225, 106, 182, 207, 172, 178, 27, 136, 195, 168, 97,
     ];
 
@@ -563,7 +603,8 @@ mod tests {
     }
 
     #[test]
-    fn mint_and_nft_outputs_reject_threshold_zero() {
+    fn mint_and_nft_outputs_with_threshold_zero() {
+        use crate::parser::tx_builder::render_all;
         use std::prelude::v1::*;
 
         // owners part: locktime, threshold, addresses
@@ -574,8 +615,7 @@ mod tests {
             v.extend(std::vec![0x63u8; 20 * addrs]);
             v
         }
-
-        for (threshold, addrs) in [(0, 0), (0, 1), (1, 1)] {
+        let raw = |threshold: u32, addrs: usize| {
             let mut secp_mint = SECPMintOutput::TYPE_ID.to_be_bytes().to_vec();
             secp_mint.extend(owners(threshold, addrs));
 
@@ -588,13 +628,35 @@ mod tests {
             nft_transfer.extend(2u32.to_be_bytes()); // payload
             nft_transfer.extend(b"hi");
             nft_transfer.extend(owners(threshold, addrs));
+            (secp_mint, nft_mint, nft_transfer)
+        };
 
-            // threshold 0 with no addresses is anyone-can-spend (or mint),
-            // with addresses it is not valid on-chain
-            let valid = threshold != 0;
-            assert_eq!(SECPMintOutput::from_bytes(&secp_mint).is_ok(), valid);
-            assert_eq!(NFTMintOutput::from_bytes(&nft_mint).is_ok(), valid);
-            assert_eq!(NFTTransferOutput::from_bytes(&nft_transfer).is_ok(), valid);
+        // Threshold 0 with no address: anyone can mint, or take the NFT. It is
+        // accepted, as it always was, and has a screen saying so.
+        let (secp_mint, nft_mint, nft_transfer) = raw(0, 0);
+        let secp_mint = render_all(&SECPMintOutput::from_bytes(&secp_mint).unwrap().1);
+        assert_eq!(secp_mint.last().unwrap(), "Address: Anyone can mint");
+        let nft_mint = render_all(&NFTMintOutput::from_bytes(&nft_mint).unwrap().1);
+        assert_eq!(nft_mint.last().unwrap(), "Address: Anyone can mint");
+        let nft_transfer = render_all(&NFTTransferOutput::from_bytes(&nft_transfer).unwrap().1);
+        assert_eq!(nft_transfer.last().unwrap(), "Owner: : Anyone can spend");
+
+        // With an address it is invalid on-chain; accepted as it was, and
+        // the threshold of 0 is on screen.
+        let (secp_mint, nft_mint, nft_transfer) = raw(0, 1);
+        let secp_mint = render_all(&SECPMintOutput::from_bytes(&secp_mint).unwrap().1);
+        assert!(secp_mint.contains(&"Threshold: 0".to_string()));
+        let nft_mint = render_all(&NFTMintOutput::from_bytes(&nft_mint).unwrap().1);
+        assert!(nft_mint.contains(&"Threshold: 0".to_string()));
+        let nft_transfer = render_all(&NFTTransferOutput::from_bytes(&nft_transfer).unwrap().1);
+        assert_eq!(nft_transfer.last().unwrap(), "Threshold: 0 of 1");
+
+        // a threshold above the number of addresses is still refused
+        for (threshold, addrs) in [(1, 0), (2, 1)] {
+            let (secp_mint, nft_mint, nft_transfer) = raw(threshold, addrs);
+            assert!(SECPMintOutput::from_bytes(&secp_mint).is_err());
+            assert!(NFTMintOutput::from_bytes(&nft_mint).is_err());
+            assert!(NFTTransferOutput::from_bytes(&nft_transfer).is_err());
         }
     }
 

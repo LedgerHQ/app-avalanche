@@ -25,7 +25,10 @@ use crate::{
     checked_add,
     handlers::handle_ui_message,
     parser::{
-        outputs::{check_locktime, render_locktime, render_threshold, shows_threshold},
+        outputs::{
+            address_items, check_locktime, check_threshold, render_locktime, render_no_owner,
+            render_threshold, shows_threshold,
+        },
         u32_to_str, Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES,
         U32_FORMATTED_SIZE,
     },
@@ -92,11 +95,8 @@ impl<'b> NFTTransferOutput<'b> {
         let addresses =
             bytemuck::try_cast_slice(addresses).map_err(|_| ParserError::InvalidAddressLength)?;
 
-        // threshold 0 is rejected as in SECPTransferOutput: with no addresses
-        // anyone can spend or mint, with addresses it is not valid on-chain.
-        if threshold == 0 || threshold as usize > addresses.len() {
-            return Err(ParserError::InvalidThreshold.into());
-        }
+        // threshold 0 is accepted and shown, see check_threshold
+        check_threshold(threshold, addresses.len())?;
 
         // the locktime is shown as a date
         check_locktime(locktime)?;
@@ -132,13 +132,14 @@ impl<'b> FromBytes<'b> for NFTTransferOutput<'b> {
 
 impl DisplayableItem for NFTTransferOutput<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        // group_id, payload, addresses and, with several, the threshold, and
-        // when the NFT is time-locked, the date it unlocks
+        // group_id, payload, addresses (or the "anyone can spend" screen when
+        // there is none) and, with several, the threshold, and when the NFT
+        // is time-locked, the date it unlocks
         checked_add!(
             ViewError::Unknown,
             2u8,
-            self.num_addresses() as u8,
-            shows_threshold(self.num_addresses()) as u8,
+            address_items(self.num_addresses()),
+            shows_threshold(self.threshold, self.num_addresses()) as u8,
             (self.locktime != 0) as u8
         )
     }
@@ -170,6 +171,8 @@ impl NFTTransferOutput<'_> {
         use bolos::{pic_str, PIC};
 
         let mut buffer = [0; U32_FORMATTED_SIZE + 2];
+        let threshold_item_n = 2 + address_items(self.num_addresses()) as usize;
+        let shows_threshold = shows_threshold(self.threshold, self.num_addresses());
 
         match item_n as usize {
             0 => {
@@ -225,7 +228,16 @@ impl NFTTransferOutput<'_> {
                 }
                 handle_ui_message(&buf[..len], message, page)
             }
-            x @ 2.. if x < self.num_addresses() + 2 => {
+            // Threshold 0 with no address: anyone can take the NFT with no
+            // signature.
+            2 if self.addresses.is_empty() => render_no_owner(
+                pic_str!(b"Owner: "),
+                pic_str!(b"Anyone can spend"),
+                title,
+                message,
+                page,
+            ),
+            x @ 2.. if x < threshold_item_n => {
                 let idx = x - 2;
                 if let Some(addr) = self.get_address_at(idx) {
                     let res = addr.render_with_hrp(hrp, title, message, page);
@@ -238,14 +250,18 @@ impl NFTTransferOutput<'_> {
                     Err(ViewError::NoData)
                 }
             }
-            x if x == self.num_addresses() + 2 && shows_threshold(self.num_addresses()) => {
+            x if x == threshold_item_n && shows_threshold => {
                 render_threshold(self.threshold, self.num_addresses(), title, message, page)
             }
             // the NFT cannot move before this date; it used to go unshown
-            x if x == self.num_addresses() + 2 + shows_threshold(self.num_addresses()) as usize
-                && self.locktime != 0 =>
-            {
-                render_locktime(pic_str!(b"Locked until"), self.locktime, title, message, page)
+            x if x == threshold_item_n + shows_threshold as usize && self.locktime != 0 => {
+                render_locktime(
+                    pic_str!(b"Locked until"),
+                    self.locktime,
+                    title,
+                    message,
+                    page,
+                )
             }
             _ => Err(ViewError::NoData),
         }
@@ -258,7 +274,7 @@ mod tests {
 
     const DATA: &[u8] = &[
         0, 0, 0, 11, 0, 0, 0, 10, 0, 0, 0, 20, 110, 102, 116, 95, 116, 114, 97, 110, 115, 102, 101,
-        114, 95, 112, 97, 121, 108, 111, 97, 100, 0, 0, 0, 0, 0, 0, 0, 56, 0, 0, 0, 1, 0, 0, 0, 1,
+        114, 95, 112, 97, 121, 108, 111, 97, 100, 0, 0, 0, 0, 0, 0, 0, 56, 0, 0, 0, 0, 0, 0, 0, 1,
         22, 54, 119, 75, 103, 131, 141, 236, 22, 225, 106, 182, 207, 172, 178, 27, 136, 195, 168,
         97,
     ];
@@ -313,7 +329,7 @@ mod tests {
         assert_eq!(out.locktime, 56);
         assert_eq!(out.group_id, 10);
         assert_eq!(out.addresses.len(), 1);
-        assert_eq!(out.threshold, 1);
+        assert_eq!(out.threshold, 0);
         assert_eq!(out.payload, "nft_transfer_payload".as_bytes());
         assert_eq!(out.addresses[0][..], DATA[(DATA.len() - 20)..]);
     }
