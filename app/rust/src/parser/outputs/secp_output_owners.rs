@@ -114,18 +114,16 @@ impl<'b> FromBytes<'b> for SECPOutputOwners<'b> {
     }
 }
 
-impl DisplayableItem for SECPOutputOwners<'_> {
-    fn num_items(&self) -> Result<u8, ViewError> {
-        // show an item for each address in the list
-        let items = self.addresses.len() as u8;
-        // show locktime only if it is higher than zero,
-        // that is why we sum up this boolean
-        checked_add!(ViewError::Unknown, items, (self.locktime > 0) as u8)
-    }
-
-    #[inline(never)]
-    fn render_item(
+impl SECPOutputOwners<'_> {
+    /// Render one counted item, encoding addresses under `hrp`.
+    ///
+    /// num_items counts a Locktime screen ahead of the addresses whenever
+    /// locktime is non-zero, so any caller that renders these items has to
+    /// apply the same offset. Keeping that arithmetic here means a caller
+    /// cannot get it wrong.
+    pub fn render_item_with_hrp(
         &self,
+        hrp: &str,
         item_n: u8,
         title: &mut [u8],
         message: &mut [u8],
@@ -152,10 +150,33 @@ impl DisplayableItem for SECPOutputOwners<'_> {
         if item_index < addr_items {
             let label = pic_str!(b"Owner address");
             title[..label.len()].copy_from_slice(label);
-            self.render_address_with_hrp("", item_index as usize, message, page)
+            self.render_address_with_hrp(hrp, item_index as usize, message, page)
         } else {
             Err(ViewError::NoData)
         }
+    }
+}
+
+impl DisplayableItem for SECPOutputOwners<'_> {
+    fn num_items(&self) -> Result<u8, ViewError> {
+        // show an item for each address in the list
+        let items = self.addresses.len() as u8;
+        // show locktime only if it is higher than zero,
+        // that is why we sum up this boolean
+        checked_add!(ViewError::Unknown, items, (self.locktime > 0) as u8)
+    }
+
+    #[inline(never)]
+    fn render_item(
+        &self,
+        item_n: u8,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
+        // No network context here; callers that have one should use
+        // render_item_with_hrp.
+        self.render_item_with_hrp("", item_n, title, message, page)
     }
 }
 
@@ -174,5 +195,42 @@ mod tests {
         assert_eq!(owner.locktime, 12);
         assert_eq!(owner.threshold, 1);
         assert_eq!(owner.addresses.len(), 1);
+    }
+
+    #[test]
+    fn owners_locktime_item_is_renderable() {
+        // This vector carries locktime 12, so num_items counts a Locktime
+        // screen ahead of the single address. Every counted item has to
+        // render: the caller in CreateSubnet used to pass this index straight
+        // through as an address index, which skipped Locktime and ran the last
+        // index off the end of the address list.
+        let (_, owners) = SECPOutputOwners::from_bytes(DATA).unwrap();
+        assert!(owners.locktime > 0);
+
+        let items = owners.num_items().expect("Overflow?");
+        assert_eq!(items as usize, owners.num_addresses() + 1);
+
+        let mut title = [0u8; 64];
+        let mut message = [0u8; 256];
+        for i in 0..items {
+            assert!(
+                owners
+                    .render_item_with_hrp("fuji", i, &mut title, &mut message, 0)
+                    .is_ok(),
+                "counted item {} did not render",
+                i
+            );
+        }
+
+        // First screen is the locktime, not an address.
+        owners
+            .render_item_with_hrp("fuji", 0, &mut title, &mut message, 0)
+            .unwrap();
+        assert!(title.starts_with(b"Locktime"));
+
+        // One past the end is an error rather than a stale screen.
+        assert!(owners
+            .render_item_with_hrp("fuji", items, &mut title, &mut message, 0)
+            .is_err());
     }
 }

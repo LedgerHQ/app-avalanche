@@ -63,6 +63,20 @@ impl<'b> FromBytes<'b> for TransferableOp<'b> {
     }
 }
 
+impl TransferableOp<'_> {
+    pub fn render_item_with_hrp(
+        &self,
+        hrp: &str,
+        item_n: u8,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
+        self.operation
+            .render_item_with_hrp(hrp, item_n, title, message, page)
+    }
+}
+
 impl DisplayableItem for TransferableOp<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
         self.operation.num_items()
@@ -196,6 +210,41 @@ impl<'b> FromBytes<'b> for Operation<'b> {
             }
         };
         Ok(rem)
+    }
+}
+
+impl Operation<'_> {
+    /// Same as the DisplayableItem rendering, but encodes every address it
+    /// shows -- NFT owners, and the SECP mint operation's new owners and mint
+    /// authority -- for `hrp`.
+    pub fn render_item_with_hrp(
+        &self,
+        hrp: &str,
+        item_n: u8,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
+        use bolos::{pic_str, PIC};
+
+        if item_n == 0 {
+            let title_content = pic_str!(b"Op. Type:");
+            title[..title_content.len()].copy_from_slice(title_content);
+
+            let op_type = self.operation_name();
+
+            return handle_ui_message(op_type.as_bytes(), message, page);
+        }
+
+        let item_n = item_n - 1;
+
+        match self {
+            Operation::NFTMint(op) => op.render_item_with_hrp(hrp, item_n, title, message, page),
+            Operation::NFTTransfer(op) => {
+                op.render_item_with_hrp(hrp, item_n, title, message, page)
+            }
+            Operation::SECPMint(op) => op.render_item_with_hrp(hrp, item_n, title, message, page),
+        }
     }
 }
 

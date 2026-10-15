@@ -19,6 +19,7 @@ import { ETH_DERIVATION, defaultOptions as commonOpts, defaultOptionsBlindSign, 
 import Eth from '@ledgerhq/hw-app-eth'
 import AvalancheApp from '@zondax/ledger-avalanche-app'
 import { ec } from 'elliptic'
+import { createRequire } from 'module'
 
 const defaultOptions = (model: any) => {
   let opts = commonOpts(model, false)
@@ -477,6 +478,69 @@ describe.each(models.filter(m => m.name !== 'nanos'))('EIP712 [%s]; sign', funct
       expect(resp).toHaveProperty('s')
       expect(resp).toHaveProperty('r')
       expect(resp).toHaveProperty('v')
+    } finally {
+      await sim.close()
+    }
+  })
+})
+
+// EIP-712 filters decide which fields are shown and under which labels, so the
+// device must only accept filters signed by Ledger's CAL key. A build with
+// HAVE_BYPASS_SIGNATURES accepted these forged filters and reviewed an
+// unlimited USDC Permit to an attacker as "Avalanche Rewards / Claim amount".
+const USDC_AVAX = '0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e'
+const EIP712_PERMIT = {
+  types: {
+    EIP712Domain: [
+      { name: 'name', type: 'string' },
+      { name: 'version', type: 'string' },
+      { name: 'chainId', type: 'uint256' },
+      { name: 'verifyingContract', type: 'address' },
+    ],
+    Permit: [
+      { name: 'owner', type: 'address' },
+      { name: 'spender', type: 'address' },
+      { name: 'value', type: 'uint256' },
+      { name: 'nonce', type: 'uint256' },
+      { name: 'deadline', type: 'uint256' },
+    ],
+  },
+  primaryType: 'Permit',
+  domain: { name: 'USD Coin', version: '2', chainId: 43114, verifyingContract: USDC_AVAX },
+  message: {
+    owner: '0x1111111111111111111111111111111111111111',
+    spender: '0xbadbadbadbadbadbadbadbadbadbadbadbadbad0',
+    value: '115792089237316195423570985008687907853269984665640564039457584007913129639935',
+    nonce: '0',
+    deadline: '9999999999',
+  },
+}
+
+describe.each(models.filter(m => m.name !== 'nanos'))('EIP712 filtering [%s]', function (m) {
+  test.concurrent('rejects filters not signed by Ledger', async function () {
+    // evm-tools is a dependency of hw-app-eth, not of this package
+    const requireFromEth = createRequire(require.resolve('@ledgerhq/hw-app-eth'))
+    const { getSchemaHashForMessage } = requireFromEth('@ledgerhq/evm-tools/message/EIP712/index')
+
+    // A well-formed DER signature from a key that is not Ledger's
+    const forgedSig = '3044' + '0220' + '01'.repeat(32) + '0220' + '02'.repeat(32)
+    const messageId = `43114:${USDC_AVAX}:${getSchemaHashForMessage(EIP712_PERMIT)}`
+    const loadConfig: any = {
+      calServiceURL: null,
+      staticEIP712SignaturesV1: {
+        [messageId]: {
+          contractName: { label: 'Avalanche Rewards', signature: forgedSig },
+          fields: [{ label: 'Claim amount', path: 'value', signature: forgedSig }],
+        },
+      },
+    }
+
+    const sim = new Zemu(m.path)
+    try {
+      await sim.start(defaultOptions(m))
+      const eth = new Eth(sim.getTransport() as any, undefined, loadConfig)
+
+      await expect(eth.signEIP712Message(ETH_DERIVATION, EIP712_PERMIT as any)).rejects.toThrow(/0x6a80/i)
     } finally {
       await sim.close()
     }

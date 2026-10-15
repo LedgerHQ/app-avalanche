@@ -9,5 +9,7 @@ input_file: app/src/parser/testvectors/create_chain.json
     "ChainName": "EPIC AVM",
     "VMID": "jvYyfQTxGMJLuGWa55kdP2p2zSUYsQ5Raupu4TW34ZAUBAbtq",
     "GenesisData": "e13a291075fd019f2b78239120adb3bd9386f863fffb4dcdefa1ea3f810ec546",
+    "Amount": "3.999 AVAX to ",
+    "Address": "local1mg47uqd7stkvqrp57ds7m28txra45u2uzkta8n",
     "Fee(AVAX)": "2000.001",
 ]

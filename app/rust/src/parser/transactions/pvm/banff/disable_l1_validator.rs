@@ -14,6 +14,7 @@
 *  limitations under the License.
 ********************************************************************************/
 
+use crate::checked_add;
 use crate::utils::hex_encode;
 use core::{mem::MaybeUninit, ptr::addr_of_mut};
 use nom::bytes::complete::{tag, take};
@@ -41,6 +42,10 @@ pub struct DisableL1ValidatorTx<'b> {
 }
 
 impl<'b> DisableL1ValidatorTx<'b> {
+    pub fn disable_output_if(&mut self, address: &[u8]) {
+        self.base_tx.disable_output_if(address);
+    }
+
     fn fee(&'b self) -> Result<u64, ParserError> {
         let sum_inputs = self.base_tx.sum_inputs_amount()?;
 
@@ -88,8 +93,14 @@ impl<'b> FromBytes<'b> for DisableL1ValidatorTx<'b> {
 
 impl DisplayableItem for DisableL1ValidatorTx<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        // tx description, validator id, fee
-        Ok(3)
+        // tx description, validator id, base outputs and fee.
+        // The base outputs were previously left out of the count entirely, so
+        // where the transaction's change went was never on screen.
+        checked_add!(
+            ViewError::Unknown,
+            3u8,
+            self.base_tx.base_outputs_num_items()?
+        )
     }
 
     fn render_item(
@@ -101,6 +112,12 @@ impl DisplayableItem for DisableL1ValidatorTx<'_> {
     ) -> Result<u8, zemu_sys::ViewError> {
         use bolos::{pic_str, PIC};
         let mut buffer = [0; U64_FORMATTED_SIZE + 2];
+
+        const START_OUTPUTS: u8 = 2;
+        let output_items = self.base_tx.base_outputs_num_items()?;
+        let end_outputs = START_OUTPUTS
+            .checked_add(output_items)
+            .ok_or(ViewError::Unknown)?;
 
         match item_n {
             0 => {
@@ -124,7 +141,13 @@ impl DisplayableItem for DisableL1ValidatorTx<'_> {
 
                 handle_ui_message(&out[..sz], message, page)
             }
-            2 => {
+            // render base outputs
+            x if (START_OUTPUTS..end_outputs).contains(&x) => {
+                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+                self.base_tx
+                    .render_base_output_with_hrp(hrp, x - START_OUTPUTS, title, message, page)
+            }
+            x if x == end_outputs => {
                 let label = pic_str!(b"Fee(AVAX)");
                 title[..label.len()].copy_from_slice(label);
 

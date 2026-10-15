@@ -1,0 +1,17 @@
+---
+source: src/parser/transactions.rs
+assertion_line: 787
+expression: reduced
+input_file: src/parser/testvectors/register_l1_validator.json
+---
+[
+    "RegisterL1Val": "Transaction",
+    "Validator": "NodeID-KUhfajVUcCf2g5UXsZ1EXZpFYryppFRcZ",
+    "Weight": "1",
+    "Balance (AVAX)": "0.1",
+    "Amount": "0.81172349 AVAX to ",
+    "Address": "fuji10mt50ctwf38jkatca7a404u0af0njcx2gwzzy8",
+    "Fee(AVAX)": "0.00004679",
+    "Rem Addr": "0xdd9103b686299295f518f33ea3b6e767d06ead89",
+    "Disabler": "0xdd9103b686299295f518f33ea3b6e767d06ead89",
+]

@@ -21,14 +21,14 @@ use crate::checked_add;
 use crate::handlers::handle_ui_message;
 use crate::parser::{
     nano_avax_to_fp_str, AvmOutput, BaseTxFields, DisplayableItem, FromBytes, Header, ParserError,
-    MAX_ADDRESS_ENCODED_LEN, TRANSFER_TX, U64_FORMATTED_SIZE
+    MAX_ADDRESS_ENCODED_LEN, TRANSFER_TX, U64_FORMATTED_SIZE,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, derive(Debug))]
 pub struct Transfer<'b> {
     header: Header<'b>,
-    base: BaseTxFields<'b, AvmOutput<'b>>,
+    pub base: BaseTxFields<'b, AvmOutput<'b>>,
 }
 
 impl Transfer<'_> {

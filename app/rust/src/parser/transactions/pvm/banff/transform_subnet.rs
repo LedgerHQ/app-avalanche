@@ -29,7 +29,7 @@ use crate::{
     parser::{
         intstr_to_fpstr_inplace, nano_avax_to_fp_str, u32_to_str, AssetId, BaseTxFields,
         DisplayableItem, FromBytes, Header, ParserError, PvmOutput, SubnetAuth, SubnetId,
-        DELEGATION_FEE_DIGITS, PVM_TRANSFORM_SUBNET, U64_FORMATTED_SIZE
+        DELEGATION_FEE_DIGITS, PVM_TRANSFORM_SUBNET, U64_FORMATTED_SIZE,
     },
     utils::is_app_mode_expert,
 };
@@ -39,7 +39,7 @@ use crate::{
 #[cfg_attr(test, derive(Debug))]
 pub struct TransformSubnetTx<'b> {
     tx_header: Header<'b>,
-    base_tx: BaseTxFields<'b, PvmOutput<'b>>,
+    pub base_tx: BaseTxFields<'b, PvmOutput<'b>>,
 
     subnet_id: SubnetId<'b>,
     asset_id: AssetId<'b>,
@@ -137,6 +137,10 @@ impl<'b> FromBytes<'b> for TransformSubnetTx<'b> {
 }
 
 impl TransformSubnetTx<'_> {
+    pub fn disable_output_if(&mut self, address: &[u8]) {
+        self.base_tx.disable_output_if(address);
+    }
+
     fn fee(&self) -> Result<u64, ParserError> {
         let sum_inputs = self.base_tx.sum_inputs_amount()?;
 
@@ -282,13 +286,16 @@ impl DisplayableItem for TransformSubnetTx<'_> {
             0
         };
 
-        //tx info, subnet id, asset id, fee
-        // + expert items
+        // tx info, subnet id, asset id, base outputs, fee
+        // + expert items.
+        // The base outputs were previously left out of the count entirely, so
+        // where the transaction's change went was never on screen.
         checked_add!(
             ViewError::Unknown,
             2u8,
             self.subnet_id.num_items()?,
             self.asset_id.num_items()?,
+            self.base_tx.base_outputs_num_items()?,
             num_expert_items
         )
     }
@@ -300,8 +307,14 @@ impl DisplayableItem for TransformSubnetTx<'_> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
-
         let expert = is_app_mode_expert();
+
+        const START_OUTPUTS: u8 = 3;
+        const EXPERT_ITEMS: u8 = 12;
+        let output_items = self.base_tx.base_outputs_num_items()?;
+        let end_outputs = START_OUTPUTS
+            .checked_add(output_items)
+            .ok_or(ViewError::Unknown)?;
 
         match item_n {
             0 => {
@@ -313,7 +326,13 @@ impl DisplayableItem for TransformSubnetTx<'_> {
             }
             1 => self.subnet_id.render_item(0, title, message, page),
             2 => self.asset_id.render_item(0, title, message, page),
-            3 => {
+            // render base outputs
+            x if (START_OUTPUTS..end_outputs).contains(&x) => {
+                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+                self.base_tx
+                    .render_base_output_with_hrp(hrp, x - START_OUTPUTS, title, message, page)
+            }
+            x if x == end_outputs => {
                 let label = pic_str!(b"Fee(AVAX)");
                 title[..label.len()].copy_from_slice(label);
 
@@ -324,7 +343,10 @@ impl DisplayableItem for TransformSubnetTx<'_> {
                     nano_avax_to_fp_str(fee, &mut buffer[..]).map_err(|_| ViewError::Unknown)?;
                 handle_ui_message(fee_buff, message, page)
             }
-            4..=15 if expert => self.render_expert(item_n - 4, title, message, page),
+            // expert items follow the fee
+            x if expert && x > end_outputs && x - end_outputs <= EXPERT_ITEMS => {
+                self.render_expert(x - end_outputs - 1, title, message, page)
+            }
             _ => Err(ViewError::NoData),
         }
     }

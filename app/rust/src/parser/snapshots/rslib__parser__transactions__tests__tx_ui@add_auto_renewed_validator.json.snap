@@ -18,4 +18,5 @@ input_file: src/parser/testvectors/add_auto_renewed_validator.json
     "AutoCompound(%)": "50",
     "Period(seconds)": "604800",
     "Fee(AVAX)": "0",
+    "Memo": "test vector",
 ]

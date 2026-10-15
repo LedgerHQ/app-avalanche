@@ -119,6 +119,22 @@ impl DisplayableItem for NFTMintOutput<'_> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
+        // No network context at this level; callers that have one should use
+        // render_item_with_hrp so the owner address is encoded for the right
+        // network instead of with an empty prefix.
+        self.render_item_with_hrp("", item_n, title, message, page)
+    }
+}
+
+impl NFTMintOutput<'_> {
+    pub fn render_item_with_hrp(
+        &self,
+        hrp: &str,
+        item_n: u8,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
         use bolos::{pic_str, PIC};
 
         let mut buffer = [0; U64_FORMATTED_SIZE + 2];
@@ -167,7 +183,7 @@ impl DisplayableItem for NFTMintOutput<'_> {
                     let mut addr = MaybeUninit::uninit();
                     Address::from_bytes_into(data, &mut addr).map_err(|_| ViewError::Unknown)?;
                     let addr = unsafe { addr.assume_init() };
-                    addr.render_item(0, title, message, page)
+                    addr.render_with_hrp(hrp, title, message, page)
                 } else {
                     Err(ViewError::NoData)
                 }

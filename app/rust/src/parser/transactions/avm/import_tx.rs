@@ -23,7 +23,7 @@ use crate::{
     handlers::handle_ui_message,
     parser::{
         nano_avax_to_fp_str, AvmOutput, BaseImport, DisplayableItem, FromBytes, ParserError,
-        AVM_IMPORT_TX, U64_FORMATTED_SIZE
+        AVM_IMPORT_TX, U64_FORMATTED_SIZE,
     },
 };
 
@@ -34,7 +34,7 @@ use crate::{
 // a custom AvmImportTx type.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, derive(Debug))]
-pub struct AvmImportTx<'b>(BaseImport<'b, AvmOutput<'b>>);
+pub struct AvmImportTx<'b>(pub BaseImport<'b, AvmOutput<'b>>);
 
 impl<'b> FromBytes<'b> for AvmImportTx<'b> {
     #[inline(never)]

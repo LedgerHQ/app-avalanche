@@ -223,3 +223,47 @@ describe.each(REJECTION_REGRESSION_MODELS)('signHash rejection [%s]', function (
     }
   })
 })
+
+// m/44'/9000'/0', serialized the way the SDK sends the signing root
+const signingRoot = () => {
+  const out = Buffer.alloc(13)
+  out.writeUInt8(3, 0)
+  out.writeUInt32BE(0x8000002c, 1)
+  out.writeUInt32BE(0x80002328, 5)
+  out.writeUInt32BE(0x80000000, 9)
+  return out
+}
+
+describe.each(REJECTION_REGRESSION_MODELS)('signHash refused suffix [%s]', function (m) {
+  // Goes through the real dispatcher (INS_SIGN_HASH -> app_sign_hash in C).
+  // A suffix the app refuses must end the session: before, the error exits in
+  // app_sign_hash returned without releasing (PATH, HASH), so a following
+  // valid suffix still signed the hash approved for the earlier request.
+  test('a refused suffix releases the reviewed hash', async function () {
+    const sim = new Zemu(m.path)
+    try {
+      await sim.start(defaultOptions(m))
+      const transport = sim.getTransport()
+      const hash = Buffer.from(sha256('Refused suffix Avalanche hash'), 'hex')
+
+      const review = transport.send(0x80, 0x04, 0x01, 0x00, Buffer.concat([signingRoot(), hash]))
+      await sim.waitUntilScreenIsNot(sim.getMainMenuSnapshot())
+      // Same navigation compareSnapshotsAndApprove performs, without snapshots.
+      await sim.navigateUntilText('.', 'unused', sim.startOptions.approveKeyword, true, false)
+      await review
+
+      // Depth 3 where the app expects a two-component suffix.
+      const badSuffix = Buffer.alloc(13)
+      badSuffix.writeUInt8(3, 0)
+      await expect(transport.send(0x80, 0x04, 0x03, 0x00, badSuffix)).rejects.toMatchObject({
+        statusCode: LedgerError.ExecutionError,
+      })
+
+      await expect(transport.send(0x80, 0x04, 0x02, 0x00, pathSuffix(0, 0))).rejects.toMatchObject({
+        statusCode: LedgerError.ExecutionError,
+      })
+    } finally {
+      await sim.close()
+    }
+  })
+})

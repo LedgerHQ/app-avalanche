@@ -10,4 +10,5 @@ input_file: app/src/parser/testvectors/simple_transfer.json
     "Transfer": "0.006999 AVAX to ",
     "Address": "fuji1qd2hdzdkjt23y6tw5km54ehpygl8upy2d5lllz",
     "Fee(AVAX)": "0.001",
+    "Memo": "00000000",
 ]

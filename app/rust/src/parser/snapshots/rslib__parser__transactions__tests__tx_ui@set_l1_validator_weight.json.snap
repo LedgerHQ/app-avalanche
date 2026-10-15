@@ -1,0 +1,19 @@
+---
+source: src/parser/transactions.rs
+assertion_line: 787
+expression: reduced
+input_file: src/parser/testvectors/set_l1_validator_weight.json
+---
+[
+    "SetL1ValWeight": "Transaction",
+    "Validator": "0x3d0ad12b8ee8928edf248ca91ca55600fb383f07c32bff1d6dec472b25cf59a7",
+    "Nonce": "42",
+    "Weight": "2000",
+    "Amount": "0.000000001 AVAX to ",
+    "Funds locked": "0.000000001 AVAX until 1972-10-11 12:25:21 UTC",
+    "Amount": "1 AVAX to ",
+    "Address": "avax1g32kvaugnx4tk3z4vemc3xd2hdz92enh972wxr",
+    "Funds locked": "1 AVAX until 1997-10-11 04:13:30 UTC",
+    "Fee(AVAX)": "1152921504.606846975",
+    "Memo": "f09f98850a77656c6c2074686174277301234521",
+]
