@@ -52,7 +52,7 @@ zxerr_t xaddr_getNumItems(uint8_t *num_items) {
     return _xaddr_num_items(xaddr_ui_obj, num_items);
 }
 
-zxerr_t xaddr_getItem(int8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen, uint8_t pageIdx,
+zxerr_t xaddr_getItem(uint8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen, uint8_t pageIdx,
                       uint8_t *pageCount) {
     return _xaddr_get_item(xaddr_ui_obj, displayIdx, (unsigned char *)outKey, outKeyLen, (unsigned char *)outVal, outValLen,
                            pageIdx, pageCount);
