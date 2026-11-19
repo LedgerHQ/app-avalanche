@@ -1007,34 +1007,107 @@ mod tests {
         }
     }
 
-    // V-016: a descriptor Ledger did not sign (the JS SDK's, a tampered one)
-    // is still used, but its host-chosen name is titled as unverified.
-    #[test]
+    /// The descriptors Ledger did not sign, with the name each carries: the
+    /// JS SDK's and a tampered one
     #[cfg(feature = "erc721")]
-    #[serial_test::file_serial(path)]
-    fn unverified_nft_collection_name_marked() {
+    fn unverified_descriptors() -> [(Vec<u8>, &'static str); 2] {
         let mut tampered = hex::decode(crate::parser::nft_info_test_vectors::SMOL_JOES).unwrap();
         let name = 3;
         tampered[name] = b'B';
 
-        let expected = |name| {
-            collection_name_pages(
-                ["NFT (unverified)", "NFT (unverified)", "ALL (unverified)"],
-                name,
-            )
-        };
-        for (descriptor, name) in [
+        [
             (sdk_nft_descriptor(b"Smol Joes", &SMOL_JOES), "Smol Joes"),
             (tampered, "Bmol Joes"),
-        ] {
-            for ((call, data), expected) in erc721_named_calls().into_iter().zip(expected(name)) {
+        ]
+    }
+
+    // V-016: a descriptor Ledger did not sign (the JS SDK's, a tampered one)
+    // is still used for the calls only ERC-721 has, but its host-chosen name
+    // is titled as unverified.
+    #[test]
+    #[cfg(feature = "erc721")]
+    #[serial_test::file_serial(path)]
+    fn unverified_nft_collection_name_marked() {
+        let [_, _, (_, approval_for_all)] = erc721_named_calls();
+        let calls = [
+            (
+                "safeTransferFrom",
+                erc721_safe_transfer_from_calldata(),
+                "NFT (unverified)",
+            ),
+            ("setApprovalForAll", approval_for_all, "ALL (unverified)"),
+        ];
+
+        for (descriptor, name) in unverified_descriptors() {
+            for (call, data, title) in &calls {
                 assert!(!provide_nft_descriptor(&descriptor));
-                let pages =
-                    render_all(eip1559_tx(AVAX_C_CHAIN_MAINNET_ID, &SMOL_JOES, 0, &data));
+                let pages = render_all(eip1559_tx(AVAX_C_CHAIN_MAINNET_ID, &SMOL_JOES, 0, data));
+                let expected = std::format!("\"{title}\": \"{name}\"");
                 assert!(pages.contains(&expected), "{call}: {pages:#?}");
                 assert!(!pages.iter().any(|p| p.contains("Collection Name")), "{call}");
                 assert!(!pages.iter().any(|p| p.contains("To Manage")), "{call}");
             }
+        }
+    }
+
+    // V-016: approve and transferFrom are ERC-20 calls too, and only the NFT
+    // info says which one the bytes are. A descriptor Ledger did not sign
+    // cannot make that choice: the call is reviewed undecoded, as blind
+    // signing, and never as an NFT call.
+    #[test]
+    #[cfg(feature = "erc721")]
+    #[serial_test::file_serial(path)]
+    fn unverified_nft_info_never_decodes_shared_selectors() {
+        let [transfer_from, approve, _] = erc721_named_calls();
+
+        // approve(spender, MAX) on a token outside the allow-list
+        const TOKEN: [u8; 20] = [0x7e; 20];
+        let mut approve_max = hex::decode("095ea7b3").unwrap();
+        approve_max.extend_from_slice(&[0; 12]);
+        approve_max.extend_from_slice(&RECIPIENT);
+        approve_max.extend_from_slice(&[0xff; 32]);
+
+        let mut wrong = Vec::new();
+        for (descriptor, name) in unverified_descriptors() {
+            let cases = [
+                (transfer_from.0, descriptor.clone(), SMOL_JOES, &transfer_from.1),
+                (approve.0, descriptor.clone(), SMOL_JOES, &approve.1),
+                (
+                    "token approve",
+                    sdk_nft_descriptor(name.as_bytes(), &TOKEN),
+                    TOKEN,
+                    &approve_max,
+                ),
+            ];
+            for (call, descriptor, contract, data) in cases {
+                for flavour in FLAVOURS {
+                    assert!(!provide_nft_descriptor(&descriptor));
+                    let blind = requires_blind_signing_in(flavour, &contract, 0, data);
+                    if blind != Ok(true) {
+                        wrong.push(std::format!("{flavour} {call}: blind {blind:?}"));
+                    }
+                }
+
+                assert!(!provide_nft_descriptor(&descriptor));
+                let pages = render_all(eip1559_tx(AVAX_C_CHAIN_MAINNET_ID, &contract, 0, data));
+                if pages
+                    .iter()
+                    .any(|p| p.contains("ERC-721") || p.contains(name) || p.contains("unverified"))
+                {
+                    wrong.push(std::format!("{call}: {pages:#?}"));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "decoded from unsigned NFT info: {wrong:#?}");
+
+        // signed by Ledger, the same calls are still decoded
+        for (call, data) in [transfer_from, approve] {
+            provide_smol_joes_info();
+            assert_eq!(
+                requires_blind_signing_in("eip1559", &SMOL_JOES, 0, &data),
+                Ok(false),
+                "{call}"
+            );
         }
     }
 

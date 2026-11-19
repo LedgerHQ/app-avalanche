@@ -406,6 +406,29 @@ impl<'b> ERC721<'b> {
         }
     }
 
+    /// Whether `data` is a call ERC-721 shares with ERC-20 (`approve`,
+    /// `transferFrom`) to the contract named by NFT info Ledger did not sign.
+    ///
+    /// Those bytes read as a token call or as an NFT call, and only the NFT
+    /// info says which. Unsigned info is whatever the host chose, so it must
+    /// not make that choice: a token `approve(spender, amount)` would be
+    /// reviewed as the approval of one NFT. Such a call is reviewed as a
+    /// generic contract call instead. `safeTransferFrom` and
+    /// `setApprovalForAll` have no ERC-20 reading and stay decoded.
+    pub fn is_unverified_shared_call(contract_address: &Address<'_>, data: &[u8]) -> bool {
+        let Ok(nft_info) = ERC721Info::get_nft_info() else {
+            return false;
+        };
+        if nft_info.verified() || contract_address != &nft_info.address() {
+            return false;
+        }
+
+        matches!(
+            be_u32::<_, ParserError>(data),
+            Ok((_, TransferFrom::SELECTOR | Approve::SELECTOR))
+        )
+    }
+
     pub fn parse_into(
         contract_address: &Address<'b>,
         data: &'b [u8],

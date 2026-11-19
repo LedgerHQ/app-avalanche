@@ -114,14 +114,23 @@ impl<'b> EthData<'b> {
                                 // transferFrom selectors with ERC-20
                                 Self::parse_erc20(to, data, out)
                                     .or_else(|_| Self::parse_contract_call(data, out))?;
+                            } else if ERC721::is_unverified_shared_call(to, data) {
+                                // NFT info Ledger did not sign cannot say
+                                // whether approve/transferFrom is a token or
+                                // an NFT call: review it undecoded
+                                Self::parse_contract_call(data, out)?;
                             } else {
                                 Self::parse_erc721(to, data, out)
                                     .or_else(|_| Self::parse_erc20(to, data, out))
                                     .or_else(|_| Self::parse_contract_call(data, out))?;
                             }
                         } else if #[cfg(feature = "erc721")] {
-                            Self::parse_erc721(to, data, out)
-                                .or_else(|_| Self::parse_contract_call(data, out))?;
+                            if ERC721::is_unverified_shared_call(to, data) {
+                                Self::parse_contract_call(data, out)?;
+                            } else {
+                                Self::parse_erc721(to, data, out)
+                                    .or_else(|_| Self::parse_contract_call(data, out))?;
+                            }
                         } else if #[cfg(feature = "erc20")] {
                             Self::parse_erc20(to, data, out)
                                 .or_else(|_| Self::parse_contract_call(data, out))?;

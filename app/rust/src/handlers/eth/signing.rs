@@ -1410,7 +1410,9 @@ mod session_tests {
         reset();
 
         // V-016: a descriptor not signed by Ledger replaces the one provided
-        // before it, and its name is titled as unverified
+        // before it. transferFrom is an ERC-20 call too, so unsigned NFT
+        // info does not get it decoded as an NFT transfer: neither name is
+        // shown
         Info::process(&descriptor).unwrap();
         let mut forged = descriptor.clone();
         let name = 3;
@@ -1418,10 +1420,9 @@ mod session_tests {
         assert_eq!(Info::process(&forged), Ok(()));
         assert_eq!(send_tx(&nft_tx), Ok(true));
         let shown = rendered();
-        assert!(shown.contains("ERC-721"));
-        assert!(shown.contains("NFT (unverified)"), "{shown}");
-        assert!(shown.contains("Bmol Joes"), "{shown}");
-        assert!(!shown.contains("Smol Joes"));
+        assert!(!shown.contains("ERC-721"), "{shown}");
+        assert!(!shown.contains("Bmol Joes"), "{shown}");
+        assert!(!shown.contains("Smol Joes"), "signed NFT info not replaced");
         assert!(!shown.contains("Collection Name"));
         reset();
 
