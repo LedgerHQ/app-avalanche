@@ -564,12 +564,16 @@ describe.each(models)('Ethereum Personal Message [%s] - misc', function (m) {
 
       const respReq = app.signPersonalMessage(ETH_DERIVATION, msgData.toString('hex'))
 
+      // Wait for the review before pressing anything: a press sent while the
+      // main menu is still up is spent there, and the navigation below then
+      // ends one screen short of the approval.
+      await sim.waitUntilScreenIsNot(currentScreen, 20000)
+
       if (m.name === 'nanox' || m.name === 'nanosp') {
         await sim.navigateAndCompareSnapshots('.', testcase, [7, -4, 6, 0])
       } else {
         // skip menu is not available for larger devices
         // like stax and flex
-        await sim.waitUntilScreenIsNot(currentScreen, 20000)
         await sim.compareSnapshotsAndApprove('.', testcase)
       }
 
