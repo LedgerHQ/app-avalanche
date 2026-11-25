@@ -29,7 +29,9 @@ use core::{mem::MaybeUninit, ptr::addr_of_mut};
 
 use crate::checked_add;
 use crate::handlers::handle_ui_message;
-use crate::parser::{AssetId, DisplayableItem, FromBytes, ObjectList, UtxoId};
+use crate::parser::{
+    asset_id::ASSET_ID_CB58_MAX_LEN, AssetId, DisplayableItem, FromBytes, ObjectList, UtxoId,
+};
 
 use super::ParserError;
 
@@ -64,6 +66,20 @@ impl<'b> FromBytes<'b> for TransferableOp<'b> {
 }
 
 impl TransferableOp<'_> {
+    /// How many UTXOs the operation consumes, each shown on its own screen.
+    /// More than a review can count is an error, not a shorter review.
+    fn utxo_items(&self) -> Result<u8, ViewError> {
+        u8::try_from(self.utx_id.iter().count()).map_err(|_| ViewError::Unknown)
+    }
+
+    /// Items: the operation type, then the asset it operates on, then every
+    /// UTXO it consumes, then the operation's own items with addresses
+    /// encoded for `hrp`.
+    ///
+    /// The asset and the consumed UTXOs were never shown, so an operation on
+    /// any NFT or mint authority the user holds reviewed the same as one on
+    /// the object they meant: group id and payload are not unique, the UTXO
+    /// id is what names the object being spent.
     pub fn render_item_with_hrp(
         &self,
         hrp: &str,
@@ -72,14 +88,43 @@ impl TransferableOp<'_> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
-        self.operation
-            .render_item_with_hrp(hrp, item_n, title, message, page)
+        use bolos::{pic_str, PIC};
+
+        let utxos = self.utxo_items()?;
+
+        match item_n {
+            0 => self
+                .operation
+                .render_item_with_hrp(hrp, 0, title, message, page),
+            1 => {
+                let label = pic_str!(b"Asset");
+                title[..label.len()].copy_from_slice(label);
+
+                let mut encoded = [0; ASSET_ID_CB58_MAX_LEN];
+                let len = self.asset_id.cb58_into(&mut encoded)?;
+                handle_ui_message(&encoded[..len], message, page)
+            }
+            x if x - 2 < utxos => self
+                .utx_id
+                .get((x - 2) as usize)
+                .ok_or(ViewError::NoData)?
+                .render_item(0, title, message, page),
+            x => self
+                .operation
+                .render_item_with_hrp(hrp, x - 1 - utxos, title, message, page),
+        }
     }
 }
 
 impl DisplayableItem for TransferableOp<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        self.operation.num_items()
+        // the operation's items, the asset and each consumed UTXO
+        checked_add!(
+            ViewError::Unknown,
+            self.operation.num_items()?,
+            1u8,
+            self.utxo_items()?
+        )
     }
 
     fn render_item(
@@ -89,7 +134,7 @@ impl DisplayableItem for TransferableOp<'_> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, zemu_sys::ViewError> {
-        self.operation.render_item(item_n, title, message, page)
+        self.render_item_with_hrp("", item_n, title, message, page)
     }
 }
 
@@ -292,6 +337,7 @@ impl DisplayableItem for Operation<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::prelude::v1::*;
 
     const DATA: &[u8] = &[
         // assetID:
@@ -323,5 +369,76 @@ mod tests {
     fn parse_transferable_operation() {
         let op = TransferableOp::from_bytes(DATA).unwrap().1;
         assert!(matches!(op.operation, Operation::NFTTransfer(..)));
+    }
+
+    /// Every screen of `op`, as `"title": "message"`, first page only.
+    fn screens(op: &TransferableOp) -> Vec<String> {
+        use crate::parser::snapshots_common::ReducedPage;
+        use zuit::Page;
+
+        (0..op.num_items().unwrap())
+            .map(|i| {
+                let mut page = Page::<18, 1024>::default();
+                op.render_item_with_hrp("fuji", i, &mut page.title, &mut page.message, 0)
+                    .unwrap_or_else(|e| panic!("item {} failed: {:?}", i, e));
+                format!("{}", ReducedPage::from(&page))
+            })
+            .collect()
+    }
+
+    /// `DATA` with its single consumed UTXO replaced by `utxos`.
+    fn with_utxos(utxos: &[([u8; 32], u32)]) -> Vec<u8> {
+        let utxo_start = 32;
+        let utxo_end = utxo_start + 4 + 36;
+        let mut data = DATA[..utxo_start].to_vec();
+        data.extend_from_slice(&(utxos.len() as u32).to_be_bytes());
+        for (tx_id, idx) in utxos {
+            data.extend_from_slice(tx_id);
+            data.extend_from_slice(&idx.to_be_bytes());
+        }
+        data.extend_from_slice(&DATA[utxo_end..]);
+        data
+    }
+
+    /// The UTXO an operation consumes names the NFT or mint authority being
+    /// spent. Two operations that differ only in it must not review the same.
+    #[test]
+    fn operation_shows_every_consumed_utxo() {
+        let a = [0x11; 32];
+        let b = [0x22; 32];
+
+        let one = with_utxos(&[(a, 5)]);
+        let other_tx = with_utxos(&[(b, 5)]);
+        let other_idx = with_utxos(&[(a, 6)]);
+        let two = with_utxos(&[(a, 5), (b, 0)]);
+
+        let one = screens(&TransferableOp::from_bytes(&one).unwrap().1);
+        let other_tx = screens(&TransferableOp::from_bytes(&other_tx).unwrap().1);
+        let other_idx = screens(&TransferableOp::from_bytes(&other_idx).unwrap().1);
+        let two = screens(&TransferableOp::from_bytes(&two).unwrap().1);
+
+        // op type, asset, then the UTXO, ahead of the operation's own fields
+        assert_eq!(one[0], r#""Op. Type:": "NFTTransferOperation""#);
+        assert!(one[1].starts_with(r#""Asset": "#));
+        assert!(one[2].starts_with(r#""UTXO": "#) && one[2].ends_with(r#":5""#));
+        assert_eq!(one[3], r#""GroupID: ": "12345""#);
+
+        assert_ne!(one, other_tx);
+        assert_ne!(one, other_idx);
+
+        // every UTXO gets its own screen, in order
+        assert_eq!(two.len(), one.len() + 1);
+        assert_eq!(two[2], one[2]);
+        assert!(two[3].starts_with(r#""UTXO": "#) && two[3].ends_with(r#":0""#));
+        assert_eq!(two[4..], one[3..]);
+    }
+
+    /// More UTXOs than a review can count is refused, not cut short.
+    #[test]
+    fn operation_with_too_many_utxos_is_refused() {
+        let utxos = vec![([0x33; 32], 0u32); 256];
+        let data = with_utxos(&utxos);
+        let op = TransferableOp::from_bytes(&data).unwrap().1;
+        assert!(op.num_items().is_err());
     }
 }

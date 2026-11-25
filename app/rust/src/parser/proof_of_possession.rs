@@ -35,6 +35,11 @@ pub struct ProofOfPossession<'b> {
 }
 
 impl ProofOfPossession<'_> {
+    #[cfg(test)]
+    pub fn public_key(&self) -> &[u8; BLS_PUBKEY_LEN] {
+        self.public_key
+    }
+
     pub fn render_address(&self, message: &mut [u8], page: u8) -> Result<u8, ViewError> {
         let prefix = pic_str!(b"0x"!);
         // prefix
@@ -46,6 +51,19 @@ impl ProofOfPossession<'_> {
             .map_err(|_| ViewError::Unknown)?;
 
         handle_ui_message(&out[..sz], message, page)
+    }
+
+    /// The "Signer" screen: the validator's BLS public key in hex.
+    pub fn render_signer(
+        &self,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
+        let label = pic_str!(b"Signer");
+        title[..label.len()].copy_from_slice(label);
+
+        self.render_address(message, page)
     }
 }
 
@@ -136,12 +154,7 @@ impl DisplayableItem for BLSSigner<'_> {
     ) -> Result<u8, ViewError> {
         match &self {
             BLSSigner::EmptyProof => Err(ViewError::NoData),
-            BLSSigner::Proof(proof) => {
-                let label = pic_str!(b"Signer");
-                title[..label.len()].copy_from_slice(label);
-
-                proof.render_address(message, page)
-            }
+            BLSSigner::Proof(proof) => proof.render_signer(title, message, page),
         }
     }
 }

@@ -52,6 +52,9 @@ mod proof_of_possession;
 #[cfg(test)]
 mod snapshots_common;
 
+#[cfg(test)]
+pub(crate) mod tx_builder;
+
 pub use address::*;
 pub use addressed_call::*;
 pub use addressed_call_payloads::*;
@@ -60,19 +63,19 @@ pub use avm_output::AvmOutput;
 pub use constants::*;
 pub use coreth::{
     bytes_to_u64, data::EthData, export_tx::ExportTx, import_tx::ImportTx, is_avax_chain_bytes,
-    native::EthTransaction, PersonalMsg,
+    native::EthTransaction, parse_rlp_item, PersonalMsg,
 };
 pub use error::ParserError;
 pub use initial_state::InitialState;
-pub use inputs::TransferableInput;
+pub use inputs::{sum_input_amounts_in, TransferableInput};
 pub use message::{AvaxMessage, Message};
 pub use network_info::*;
 pub use node_id::*;
 pub use object_list::ObjectList;
 pub use operations::TransferableOp;
 pub use outputs::{
-    NFTMintOutput, NFTTransferOutput, Output, OutputType, SECPMintOutput, SECPOutputOwners,
-    SECPTransferOutput, TransferableOutput,
+    sum_amounts_in, NFTMintOutput, NFTTransferOutput, Output, OutputLock, OutputType,
+    SECPMintOutput, SECPOutputOwners, SECPTransferOutput, TransferableOutput,
 };
 pub use pchain_owner::PchainOwner;
 pub use pvm_output::PvmOutput;
@@ -85,7 +88,15 @@ pub use validator::*;
 pub use warp_message::*;
 
 #[cfg(feature = "erc721")]
-pub use coreth::{data::ERC721Info, nft_info::NftInfo};
+pub use coreth::{
+    data::ERC721Info,
+    nft_info::{NftInfo, SignedNftDescriptor},
+};
+
+#[cfg(test)]
+pub(crate) use coreth::native::rlp_test_utils;
+#[cfg(all(test, feature = "erc721"))]
+pub(crate) use coreth::nft_info::tests as nft_info_test_vectors;
 
 ///This trait defines the interface useful in the UI context
 /// so that all the different OperationTypes or other items can handle their own UI

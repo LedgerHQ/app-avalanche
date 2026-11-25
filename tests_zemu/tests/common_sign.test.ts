@@ -267,3 +267,68 @@ describe.each(REJECTION_REGRESSION_MODELS)('signHash refused suffix [%s]', funct
     }
   })
 })
+
+describe.each(REJECTION_REGRESSION_MODELS)('signHash suffix during the review [%s]', function (m) {
+  // INS_SIGN_HASH stores the requested hash when FIRST_MESSAGE parses, so the
+  // review can show it. A suffix APDU sent while that review is still on screen
+  // used to be signed straight away. A client transport serialises requests,
+  // so the racing APDU goes to Speculos' REST API directly.
+  test('a hash is not signed before the user approves it', async function () {
+    const sim = new Zemu(m.path)
+    try {
+      await sim.start(defaultOptions(m))
+      const apduUrl = `http://127.0.0.1:${(sim as any).speculosApiPort}/apdu`
+      const sendRaw = (p1: number, data: Buffer): Promise<string> =>
+        fetch(apduUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ data: Buffer.concat([Buffer.from([0x80, 0x04, p1, 0x00, data.length]), data]).toString('hex') }),
+        })
+          .then(r => r.json())
+          .then(r => r.data as string)
+
+      const hash = Buffer.from(sha256('Unapproved Avalanche hash'), 'hex')
+      const review = sendRaw(0x01, Buffer.concat([signingRoot(), hash]))
+      await sim.waitUntilScreenIsNot(sim.getMainMenuSnapshot())
+
+      // nobody touched the device: no signature. Since API level 27 the SDK
+      // refuses any command while a reply is pending (SWO_COMMAND_NOT_ACCEPTED);
+      // the app's own approval check would answer 0x6400 behind it.
+      const suffixReply = await sendRaw(0x03, pathSuffix(0, 0))
+      expect(suffixReply).toEqual('6901')
+
+      await review
+    } finally {
+      await sim.close()
+    }
+  })
+})
+
+describe.each(REJECTION_REGRESSION_MODELS)('signHash last suffix [%s]', function (m) {
+  // The signature is written over the APDU buffer, and app_sign_hash used to
+  // read P1 back from it afterwards, so the LAST_MESSAGE suffix did not
+  // reliably end the session and further suffixes kept signing the hash.
+  test('the last suffix releases the reviewed hash', async function () {
+    const sim = new Zemu(m.path)
+    try {
+      await sim.start(defaultOptions(m))
+      const transport = sim.getTransport()
+      const hash = Buffer.from(sha256('Last suffix Avalanche hash'), 'hex')
+
+      const review = transport.send(0x80, 0x04, 0x01, 0x00, Buffer.concat([signingRoot(), hash]))
+      await sim.waitUntilScreenIsNot(sim.getMainMenuSnapshot())
+      await sim.navigateUntilText('.', 'unused', sim.startOptions.approveKeyword, true, false)
+      await review
+
+      // LAST_MESSAGE suffix: signs and ends the session
+      const signature = await transport.send(0x80, 0x04, 0x02, 0x00, pathSuffix(0, 0))
+      expect(signature.length).toEqual(65 + 2)
+
+      await expect(transport.send(0x80, 0x04, 0x03, 0x00, pathSuffix(0, 1))).rejects.toMatchObject({
+        statusCode: LedgerError.ExecutionError,
+      })
+    } finally {
+      await sim.close()
+    }
+  })
+})

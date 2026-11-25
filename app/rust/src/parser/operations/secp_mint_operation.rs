@@ -15,7 +15,9 @@
 ********************************************************************************/
 
 use crate::checked_add;
-use crate::parser::{DisplayableItem, SECPMintOutput, SECPTransferOutput};
+use crate::parser::{
+    u64_to_str, DisplayableItem, SECPMintOutput, SECPTransferOutput, U64_FORMATTED_SIZE,
+};
 
 use crate::{
     handlers::handle_ui_message,
@@ -131,15 +133,20 @@ impl SECPMintOperation<'_> {
 
         match item_n {
             0 => {
-                let res = self
-                    .transfer_output
-                    .render_item_with_hrp(hrp, 0, title, message, page);
-                title.iter_mut().for_each(|v| *v = 0);
                 // this operation consumes mint and transfer new ones to
                 // list of owners so change this title.
                 let title_content = pic_str!(b"Transfer: ");
                 title[..title_content.len()].copy_from_slice(title_content);
-                res
+
+                // The minted asset is the operation's, shown on its Asset
+                // screen, never AVAX: show raw units, not "<amount> AVAX".
+                let units = pic_str!(b" units to "!);
+                let mut buffer = [0; U64_FORMATTED_SIZE + 10];
+                let len = u64_to_str(self.transfer_output.amount, &mut buffer[..])
+                    .map_err(|_| ViewError::Unknown)?
+                    .len();
+                buffer[len..len + units.len()].copy_from_slice(&units[..]);
+                handle_ui_message(&buffer[..len + units.len()], message, page)
             }
             x @ 1.. if x < transfer_items => {
                 self.transfer_output
@@ -231,6 +238,25 @@ mod tests {
         assert_eq!(title, expected);
 
         assert!(op.render_item(items, &mut title, &mut message, 0).is_err());
+    }
+
+    #[test]
+    fn minted_amount_is_not_labelled_avax() {
+        use crate::parser::tx_builder::render_all;
+
+        // The minted asset is the operation's own, never AVAX, but the
+        // transfer's amount was shown as "<amount> AVAX to".
+        let raw_input = [
+            0, 0, 0, 8, 0, 0, 0, 4, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 64, 0, 0, 0, 8, 0, 0, 0, 6, 0,
+            0, 0, 0, 0, 0, 0, 20, 0, 0, 0, 1, 0, 0, 0, 2, 157, 31, 52, 188, 58, 111, 35, 6, 202, 7,
+            144, 22, 174, 248, 92, 19, 23, 103, 242, 56, 22, 54, 119, 75, 103, 131, 141, 236, 22,
+            225, 106, 182, 207, 172, 178, 27, 136, 195, 168, 97, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 39,
+            16, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 1, 0, 0, 0, 1, 157, 31, 52, 188, 58, 111, 35, 6,
+            202, 7, 144, 22, 174, 248, 92, 19, 23, 103, 242, 56,
+        ];
+        let op = SECPMintOperation::from_bytes(&raw_input).unwrap().1;
+        let screens = render_all(&op);
+        assert_eq!(screens[1], "Transfer: : 10000 units to ");
     }
 
     #[test]

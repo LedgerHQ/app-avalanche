@@ -31,6 +31,8 @@ extern "C" {
         if (__err != parser_ok) return __err; \
     }
 
+// Mirrored by ParserError in app/rust/src/parser/error.rs, whose values the
+// Rust side returns verbatim. Keep the two in lockstep.
 typedef enum {
     parser_ok = 0,
     parser_no_data = 1,
@@ -70,7 +72,12 @@ typedef enum {
     parser_nft_info_not_provided = 35,
     parser_invalid_contract_address = 36,
     parser_context_unexpected_size = 37,
+    parser_too_many_addresses = 38,
+    parser_invalid_message_size = 39,
+    parser_invalid_codec_id = 40,
+    parser_invalid_length = 41,
     parser_blind_sign_not_enabled = 42,
+    parser_invalid_source_address_size = 43,
 } parser_error_t;
 #include <stdint.h>
 

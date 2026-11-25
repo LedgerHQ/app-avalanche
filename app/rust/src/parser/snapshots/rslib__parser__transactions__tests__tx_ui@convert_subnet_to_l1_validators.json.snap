@@ -1,0 +1,20 @@
+---
+source: src/parser/transactions.rs
+expression: reduced
+input_file: src/parser/testvectors/convert_subnet_to_l1_validators.json
+---
+[
+    "ConvertSubnetToL1": "Transaction",
+    "Chain ID": "0x404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "Manager": "0x000000000000000000000000000000000000dead",
+    "SubnetID": "SkB92YpWm4Q2ijQHH34cqbKkCZWszsiQgHVjtNeFF2HdvDQU",
+    "Fee(AVAX)": "0.001",
+    "Validator": "NodeID-NFBbbJ4qCmNaCzeW7sxErhvWqvEQMnYcN",
+    "Weight": "100",
+    "Balance (AVAX)": "1",
+    "Signer": "0x303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "Rem Addr": "avax1t293cv98hrjdrshk48st84x976nm3jwss9cqum",
+    "Disabler": "avax1crl7uqxqllhqps8lacqvpllwqrq0lmsqtwy3c3",
+    "Amount": "8.999 AVAX to ",
+    "Address": "avax1vdhmjcdchnjdqqu8jm6akvc0anywxmmj8klf8l",
+]

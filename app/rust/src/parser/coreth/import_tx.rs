@@ -90,6 +90,20 @@ impl<'b> FromBytes<'b> for ImportTx<'b> {
         let outs = unsafe { &mut *addr_of_mut!((*this).outputs).cast() };
         let rem = ObjectList::<EVMOutput>::new_into(rem, outs)?;
 
+        // Since Banff coreth rejects imports of anything but AVAX
+        // (ErrImportNonAVAXInputBanff, ErrImportNonAVAXOutputBanff). Refuse
+        // them here as well: the amounts are shown with AVAX's denomination
+        // and the fee is only meaningful in AVAX.
+        if let Some(avax) = unsafe { (*header).avax_asset_id() } {
+            let inputs = unsafe { inputs.assume_init_ref() };
+            let outs = unsafe { outs.assume_init_ref() };
+            if inputs.iter().any(|i| i.asset_id().id() != avax)
+                || outs.iter().any(|o| o.asset_id().id() != avax)
+            {
+                return Err(ParserError::UnexpectedType.into());
+            }
+        }
+
         //good ptr and no uninit reads
         unsafe {
             addr_of_mut!((*this).source_chain).write(source_chain);
@@ -286,6 +300,42 @@ impl DisplayableItem for ImportTx<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_avax_assets_are_rejected() {
+        use crate::parser::{Transaction, AVAX_ASSET_ID_LOCAL};
+        use std::prelude::v1::*;
+
+        // coreth has refused atomic transactions in any asset but AVAX since
+        // Banff, while the review shows these amounts as AVAX. Swap each AVAX
+        // asset id of this local-network vector, in turn, for another asset.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/parser/testvectors/c_import_from_x.json"
+        );
+        let data: Vec<u8> =
+            serde_json::from_reader(std::fs::File::open(path).unwrap()).unwrap();
+        assert!(Transaction::new(&data).is_ok());
+
+        let positions: Vec<usize> = data
+            .windows(32)
+            .enumerate()
+            .filter(|(_, w)| *w == AVAX_ASSET_ID_LOCAL)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(positions.len() >= 2, "an input and an output in AVAX");
+
+        for at in positions {
+            let mut swapped = data.clone();
+            swapped[at..at + 32].copy_from_slice(&[0x5c; 32]);
+            assert_eq!(
+                Transaction::new(&swapped).unwrap_err(),
+                ParserError::UnexpectedType,
+                "asset at {}",
+                at
+            );
+        }
+    }
 
     const DATA: &[u8] = &[
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x9d, 0x07, 0x75, 0xf4, 0x50, 0x60, 0x4b,

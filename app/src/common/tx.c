@@ -118,7 +118,7 @@ zxerr_t tx_getNumItems(uint8_t *num_items) {
     return zxerr_ok;
 }
 
-zxerr_t tx_getItem(int8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen, uint8_t pageIdx,
+zxerr_t tx_getItem(uint8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen, uint8_t pageIdx,
                    uint8_t *pageCount) {
     uint8_t numItems = 0;
 
@@ -160,7 +160,7 @@ zxerr_t tx_getNumItemsBlindSign(uint8_t *num_items) {
     return zxerr_ok;
 }
 
-zxerr_t tx_getItemBlindSign(int8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen,
+zxerr_t tx_getItemBlindSign(uint8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen,
                             uint8_t pageIdx, uint8_t *pageCount) {
     uint8_t numItems = 0;
 

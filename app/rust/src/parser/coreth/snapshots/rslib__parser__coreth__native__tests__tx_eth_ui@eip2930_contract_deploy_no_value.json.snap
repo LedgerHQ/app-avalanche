@@ -7,6 +7,7 @@ input_file: src/parser/coreth/eth_testvectors/eip2930_contract_deploy_no_value.j
     "Chain ID": "2",
     "Contract": "Creation",
     "Gas Limit": "40000000",
-    "Data: ": "0x7f7465737432000000000000000000859500002001000000000000000000...",
+    "Data Length": "324 bytes",
+    "Data Hash": "0xbac8ae0b477e31e36e1fc7aaf720c13bf7908391fa49cbaa8631b0c4a10c008d",
     "Maximum Fee(GWEI)": "0.04",
 ]

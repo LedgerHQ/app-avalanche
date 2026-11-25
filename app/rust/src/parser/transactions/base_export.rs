@@ -24,20 +24,38 @@ use crate::{
     constants::chain_alias_lookup,
     handlers::handle_ui_message,
     parser::{
-        BaseTxFields, ChainId, DisplayableItem, FromBytes, Header, ObjectList, Output, OutputIdx,
-        ParserError, TransferableInput, TransferableOutput, BLOCKCHAIN_ID_LEN,
-        MAX_ADDRESS_ENCODED_LEN,
+        output_visibility, sum_amounts_in, BaseTxFields, ChainId, DisplayableItem, FromBytes,
+        Header, ObjectList, Output, OutputIdx, OutputLock, ParserError, TransferableInput,
+        TransferableOutput, BLOCKCHAIN_ID_LEN,
     },
 };
 
 pub const DESTINATION_CHAIN_LEN: usize = BLOCKCHAIN_ID_LEN;
+
+/// Title an exported output's amount screen "Export to <chain>", so it
+/// cannot be mistaken for an output that stays on this chain: both used to
+/// be titled "Amount".
+pub fn title_export_amount(
+    destination_chain: &[u8; DESTINATION_CHAIN_LEN],
+    title: &mut [u8],
+) -> Result<(), ViewError> {
+    let label = pic_str!(b"Export to "!);
+    let alias = chain_alias_lookup(destination_chain)
+        .map(|a| a.as_bytes())
+        .map_err(|_| ViewError::Unknown)?;
+
+    title.iter_mut().for_each(|v| *v = 0);
+    title[..label.len()].copy_from_slice(&label[..]);
+    title[label.len()..label.len() + alias.len()].copy_from_slice(alias);
+    Ok(())
+}
 const EXPORT_TX_DESCRIPTION_LEN: usize = 13; //X to C Chain
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, derive(Debug))]
 pub struct BaseExport<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     pub tx_header: Header<'b>,
     pub base_tx: BaseTxFields<'b, O>,
@@ -51,7 +69,7 @@ where
 
 impl<'b, O> FromBytes<'b> for BaseExport<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     #[inline(never)]
     fn from_bytes_into(
@@ -65,7 +83,11 @@ where
 
         // base_tx
         let base_tx = unsafe { &mut *addr_of_mut!((*out).base_tx).cast() };
-        let rem = BaseTxFields::<O>::from_bytes_into(rem, base_tx)?;
+        let rem = BaseTxFields::<O>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_tx,
+        )?;
 
         let (rem, destination_chain) = take(DESTINATION_CHAIN_LEN)(rem)?;
         let destination_chain = arrayref::array_ref!(destination_chain, 0, DESTINATION_CHAIN_LEN);
@@ -103,8 +125,21 @@ where
 
 impl<'b, O> BaseExport<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
+    /// (visible, total) outputs, base and exported, left by the change filter
+    pub fn output_visibility(&self) -> (usize, usize) {
+        let (visible, total) = self.base_tx.output_visibility();
+        let (export_visible, export_total) = output_visibility(&self.outputs, self.renderable_out);
+        (visible + export_visible, total + export_total)
+    }
+
+    /// Undo the change filter on every output
+    pub fn show_all_outputs(&mut self) {
+        self.base_tx.show_all_outputs();
+        self.renderable_out = OutputIdx::MAX;
+    }
+
     pub fn disable_output_if(&mut self, address: &[u8]) {
         self.base_tx.disable_output_if(address);
 
@@ -116,16 +151,17 @@ where
 
         let mut idx = 0;
         let mut render = self.renderable_out;
+        let avax = self.tx_header.avax_asset_id();
 
         // outputs is defined as an Object List of TransferableOutputs,
         // when parsing transactions we ensure that it is not longer than
         // 64, as we use that value as a limit for the bitwise operation,
-        // this ensures that render ^= 1 << idx never overflows.
+        // this ensures that 1 << idx never overflows.
         self.outputs.iterate_with(|o| {
-            // The 99.99% of the outputs contain only one address(best case),
-            // In the worse case we just show every output.
-            if o.num_addresses() == 1 && o.contain_address(address) {
-                render ^= 1 << idx;
+            if o.is_hideable_change(address, avax) {
+                // clear the bit: toggling it would show the output
+                // again when a second change path matched it too
+                render &= !(1 << idx);
             }
             idx += 1;
         });
@@ -164,13 +200,9 @@ where
         Ok(fee)
     }
 
+    // AVAX only, as the fee is paid in AVAX
     pub fn sum_export_outputs_amount(&'b self) -> Result<u64, ParserError> {
-        self.outputs
-            .iter()
-            .map(|output| output.amount().ok_or(ParserError::UnexpectedError))
-            .try_fold(0u64, |acc, x| {
-                acc.checked_add(x?).ok_or(ParserError::OperationOverflows)
-            })
+        sum_amounts_in(&self.outputs, self.tx_header.avax_asset_id())
     }
 
     // Default implementation similar to "num_items", this relies on the
@@ -187,7 +219,7 @@ where
         // outputs is defined as an Object List of TransferableOutputs,
         // when parsing transactions we ensure that it is not longer than
         // 64, as we use that value as a limit for the bitwise operation,
-        // this ensures that render ^= 1 << idx never overflows.
+        // this ensures that 1 << idx never overflows.
         self.outputs.iterate_with(|o| {
             let render = self.renderable_out & (1 << idx);
             if render > 0 {
@@ -258,42 +290,17 @@ where
         page: u8,
     ) -> Result<u8, zemu_sys::ViewError> {
         let (obj, obj_item_n) = self.get_output_with_item(item_n)?;
+        // Import/Export only supports secp_transfer types
+        let _ = obj.output().secp_transfer().ok_or(ViewError::NoData)?;
 
-        // Base Import/Export only supports secp_transfer types
-        let obj = (*obj).secp_transfer().ok_or(ViewError::NoData)?;
+        let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+        let avax = self.tx_header.avax_asset_id();
+        let res = obj.render_item_with_hrp(hrp, avax, obj_item_n, title, message, page);
 
-        // get the number of items for the obj wrapped up by PvmOutput
-        let num_inner_items = obj.num_items()?;
-
-        // do a custom rendering of the first base_output_items
-        match obj_item_n {
-            0 => {
-                // render amount
-                obj.render_item(0, title, message, page)
-            }
-            // address rendering, according to avax team 99.99% of transactions only comes with one
-            // address, but we support rendering any
-            x @ 1.. if x < num_inner_items => {
-                // get the address index
-                let address_idx = x - 1;
-                let address = obj
-                    .get_address_at(address_idx as usize)
-                    .ok_or(ViewError::NoData)?;
-                // render encoded address with proper hrp,
-                let t = pic_str!(b"Address");
-                title[..t.len()].copy_from_slice(t);
-
-                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
-                let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
-
-                let addr_len = address
-                    .encode_into(hrp, &mut encoded[..])
-                    .map_err(|_| ViewError::Unknown)?;
-
-                handle_ui_message(&encoded[..addr_len], message, page)
-            }
-            _ => Err(ViewError::NoData),
+        if obj_item_n == 0 {
+            title_export_amount(self.destination_chain, title)?;
         }
+        res
     }
 
     pub fn render_export_description(

@@ -16,8 +16,9 @@
 use crate::{
     handlers::handle_ui_message,
     parser::{
-        error::ParserError, nano_avax_to_fp_str, timestamp_to_str_date, Address, DisplayableItem,
-        FromBytes, Output, OutputType, SECPOutputOwners, SECPTransferOutput,
+        error::ParserError, nano_avax_to_fp_str, timestamp_to_date, timestamp_to_str_date, Address,
+        DisplayableItem,
+        FromBytes, Output, OutputLock, OutputType, SECPOutputOwners, SECPTransferOutput,
         FORMATTED_STR_DATE_LEN, U64_FORMATTED_SIZE
     },
 };
@@ -26,7 +27,7 @@ use core::ops::Deref;
 use core::{mem::MaybeUninit, ptr::addr_of_mut};
 use nom::{
     bytes::complete::tag,
-    number::complete::{be_i64, be_u32},
+    number::complete::{be_u32, be_u64},
 };
 use zemu_sys::ViewError;
 
@@ -40,7 +41,7 @@ const AVAX_UNTIL: &[u8; 12] = b" AVAX until ";
 #[repr(C)]
 #[cfg_attr(test, derive(Debug))]
 pub struct PvmOutput<'b> {
-    pub locktime: Option<i64>,
+    pub locktime: Option<u64>,
     pub output: Output<'b>,
 }
 
@@ -49,6 +50,12 @@ impl<'b> Deref for PvmOutput<'b> {
 
     fn deref(&self) -> &Self::Target {
         &self.output
+    }
+}
+
+impl OutputLock for PvmOutput<'_> {
+    fn stakeable_locktime(&self) -> Option<u64> {
+        self.locktime
     }
 }
 
@@ -82,8 +89,12 @@ impl<'b> FromBytes<'b> for PvmOutput<'b> {
         let rem = if let Ok((r, _)) =
             tag::<_, _, ParserError>(Self::LOCKED_OUTPUT_TAG.to_be_bytes())(input)
         {
-            // locked outputs should come with a locktime
-            let (rem, raw_locktime) = be_i64(r)?;
+            // locked outputs should come with a locktime. It is a u64 on
+            // the wire (stakeable.LockOut.Locktime) and has to be shown as a
+            // date, so refuse one the date formatter cannot represent here
+            // rather than failing when the screen is rendered.
+            let (rem, raw_locktime) = be_u64(r)?;
+            timestamp_to_date(raw_locktime).map_err(|_| ParserError::InvalidTimestamp)?;
             locktime = Some(raw_locktime);
             rem
         } else {
@@ -195,6 +206,58 @@ impl DisplayableItem for PvmOutput<'_> {
                 handle_ui_message(&content[..total_len], message, page)
             }
             _ => Err(ViewError::NoData),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::prelude::v1::*;
+
+    // stakeable.LockOut{locktime, SECPTransferOutput{1 AVAX, 0, 1, [addr]}}
+    fn locked_output(locktime: u64) -> Vec<u8> {
+        let mut v = PvmOutput::LOCKED_OUTPUT_TAG.to_be_bytes().to_vec();
+        v.extend(locktime.to_be_bytes());
+        v.extend(SECPTransferOutput::TYPE_ID.to_be_bytes());
+        v.extend(1_000_000_000u64.to_be_bytes());
+        v.extend(0u64.to_be_bytes());
+        v.extend(1u32.to_be_bytes());
+        v.extend(1u32.to_be_bytes());
+        v.extend([0x63; 20]);
+        v
+    }
+
+    fn locked_line(output: &PvmOutput) -> String {
+        let item = output.num_items().unwrap() - 1;
+        let mut title = [0u8; 18];
+        let mut message = [0u8; 100];
+        output.render_item(item, &mut title, &mut message, 0).unwrap();
+        let end = message.iter().position(|&b| b == 0).unwrap();
+        String::from_utf8(message[..end].to_vec()).unwrap()
+    }
+
+    #[test]
+    fn stakeable_lock_renders_its_date() {
+        // 2025-01-01 00:00:00 UTC
+        let data = locked_output(1_735_689_600);
+        let (_, output) = PvmOutput::from_bytes(&data).unwrap();
+        assert_eq!(output.locktime, Some(1_735_689_600));
+        assert_eq!(locked_line(&output), "1 AVAX until 2025-01-01 00:00:00 UTC");
+    }
+
+    #[test]
+    fn stakeable_lock_beyond_date_table_is_rejected() {
+        // About 11.76 million years out. The day count used to be truncated to
+        // u32, so this printed as "until 2025-01-01 00:00:00 UTC".
+        for locktime in [0x0001_5180_6774_8580u64, 1 << 63, u64::MAX] {
+            let data = locked_output(locktime);
+            assert_eq!(
+                PvmOutput::from_bytes(&data).unwrap_err(),
+                ParserError::InvalidTimestamp.into(),
+                "locktime {:#x}",
+                locktime
+            );
         }
     }
 }

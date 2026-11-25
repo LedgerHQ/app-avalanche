@@ -255,6 +255,10 @@ The first packet/chunk includes the root derivation path.
 | Path[1]     | byte (4) | Derivation Path Data      | 0x80002328 or 0x8000003c |
 | Path[2]     | byte (4) | Derivation Path Data      | ?          |
 
+All three components must be hardened, and the coin type 0x80002328 (9000')
+or 0x8000003c (60'), for every transaction type. Anything else is refused
+(0x6A80, data invalid).
+
 ##### Add
 
 | Field   | Type     | Content      | Expected |
@@ -277,6 +281,15 @@ Any byte after is understood to be part of the message to sign and will be parse
 | Path[0]       | byte (4) | Derivation Path Data      | ?        |
 | Path[1]       | byte (4) | Derivation Path Data      |          |
 | ...           | ...      | ...                       |          |
+
+Each change path is a two-component suffix of the root path, with any values;
+the transaction is refused if one has any other number of components.
+
+An output is only left off the review when it is a plain secp256k1 transfer
+output (not stakeable-locked) of the network's AVAX asset, with locktime 0,
+threshold 1 and a change path's address as its only address. For transfers,
+imports and exports, if that would leave no output at all on screen, every
+output is shown. C-chain exports never hide an output.
 
 ##### Last
 

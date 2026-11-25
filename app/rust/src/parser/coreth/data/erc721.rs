@@ -27,7 +27,6 @@ use crate::{
         Address, AssetId, DisplayableItem, FromBytes, NftInfo, ParserError, ADDRESS_LEN,
         ETH_ARG_LEN,
     },
-    utils::ApduPanic,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,6 +39,17 @@ impl ERC721Info {
             Ok(Some(some)) => Ok(some),
             _ => Err(ParserError::NftInfoNotProvided),
         }
+    }
+
+    /// The NFT info a review renders from.
+    ///
+    /// The parse checked it was there, but the review keeps reading it at
+    /// every screen, while requests that arrive during the review can
+    /// re-lock or clear the slot (INS_PROVIDE_NFT_INFORMATION, or an ETH
+    /// request that resets the ETH state). That fails the render with an
+    /// error the review shows, instead of aborting the device.
+    fn nft_info_for_render() -> Result<&'static NftInfo, ViewError> {
+        Self::get_nft_info().map_err(|_| ViewError::Unknown)
     }
 
     #[cfg(test)]
@@ -72,8 +82,7 @@ impl DisplayableItem for BaseTransfer<'_> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
-        // valid as at this point it was checked
-        let nft_info = ERC721Info::get_nft_info().apdu_unwrap();
+        let nft_info = ERC721Info::nft_info_for_render()?;
 
         match item_n {
             0 => {
@@ -84,7 +93,14 @@ impl DisplayableItem for BaseTransfer<'_> {
                 self.to.render_eth_address(message, page)
             }
             1 => {
-                let label = pic_str!(b"Collection Name");
+                // the name is the host's unless Ledger signed it
+                let verified = pic_str!(b"Collection Name");
+                let unverified = pic_str!(b"NFT (unverified)");
+                let label: &[u8] = if nft_info.verified() {
+                    verified
+                } else {
+                    unverified
+                };
                 title[..label.len()].copy_from_slice(label);
 
                 nft_info.render_collection_name(message, page)
@@ -187,6 +203,21 @@ impl SafeTransferFrom<'_> {
     pub const SELECTOR: u32 = u32::from_be_bytes([0x42, 0x84, 0x2e, 0x0e]);
     pub const SELECTOR_DATA: u32 = u32::from_be_bytes([0xb8, 0x8d, 0x4f, 0xde]);
     const CALL_DATA_PREVIEW_LEN: usize = 15;
+
+    /// Whether the call passes `bytes data` to the recipient's
+    /// `onERC721Received` hook. Those bytes are not shown, so signing such a
+    /// call is blind signing.
+    ///
+    /// Only the canonical encoding of an empty `bytes` (its offset, right
+    /// after the four head words, then a zero length) counts as no data;
+    /// anything else, including a non-canonical encoding of empty bytes,
+    /// counts as data.
+    pub fn carries_data(&self) -> bool {
+        let mut empty = [0u8; 2 * ETH_ARG_LEN];
+        empty[ETH_ARG_LEN - 1] = 4 * ETH_ARG_LEN as u8;
+
+        !self.data.is_empty() && self.data != empty
+    }
 }
 
 impl<'b> FromBytes<'b> for SafeTransferFrom<'b> {
@@ -365,6 +396,39 @@ impl<'b> ERC721<'b> {
         }
     }
 
+    /// Whether the review leaves signed bytes off the screen: the `bytes
+    /// data` of a `safeTransferFrom` (see [`SafeTransferFrom::carries_data`]).
+    /// Every other call is decoded and shown in full.
+    pub fn requires_blind_signing(&self) -> bool {
+        match self {
+            ERC721::SafeTransferFrom(call) => call.carries_data(),
+            ERC721::TransferFrom(_) | ERC721::Approve(_) | ERC721::ApprovalForAll(_) => false,
+        }
+    }
+
+    /// Whether `data` is a call ERC-721 shares with ERC-20 (`approve`,
+    /// `transferFrom`) to the contract named by NFT info Ledger did not sign.
+    ///
+    /// Those bytes read as a token call or as an NFT call, and only the NFT
+    /// info says which. Unsigned info is whatever the host chose, so it must
+    /// not make that choice: a token `approve(spender, amount)` would be
+    /// reviewed as the approval of one NFT. Such a call is reviewed as a
+    /// generic contract call instead. `safeTransferFrom` and
+    /// `setApprovalForAll` have no ERC-20 reading and stay decoded.
+    pub fn is_unverified_shared_call(contract_address: &Address<'_>, data: &[u8]) -> bool {
+        let Ok(nft_info) = ERC721Info::get_nft_info() else {
+            return false;
+        };
+        if nft_info.verified() || contract_address != &nft_info.address() {
+            return false;
+        }
+
+        matches!(
+            be_u32::<_, ParserError>(data),
+            Ok((_, TransferFrom::SELECTOR | Approve::SELECTOR))
+        )
+    }
+
     pub fn parse_into(
         contract_address: &Address<'b>,
         data: &'b [u8],
@@ -405,6 +469,15 @@ impl<'b> ERC721<'b> {
                 let item = unsafe { &mut *addr_of_mut!((*out).1).cast() };
 
                 _ = SafeTransferFrom::from_bytes_into(rem, item)?;
+
+                // safeTransferFrom(address,address,uint256) is strictly
+                // fixed-arity: bytes past its arguments would be signed
+                // without being shown. Only the overload taking
+                // `bytes data` carries more.
+                let call = unsafe { item.assume_init_ref() };
+                if selector == SafeTransferFrom::SELECTOR && !call.data.is_empty() {
+                    return Err(ParserError::UnexpectedData);
+                }
 
                 //no invalid ptrs
                 unsafe {
@@ -470,8 +543,7 @@ impl<'b> ERC721<'b> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
-        // this wont panic as it was checked at parsing
-        let nft_info = ERC721Info::get_nft_info().apdu_unwrap();
+        let nft_info = ERC721Info::nft_info_for_render()?;
 
         match item_n {
             0 => {
@@ -482,7 +554,14 @@ impl<'b> ERC721<'b> {
                 this.controller.render_eth_address(message, page)
             }
             1 => {
-                let label = pic_str!(b"To Manage your");
+                // the name is the host's unless Ledger signed it
+                let verified = pic_str!(b"To Manage your");
+                let unverified = pic_str!(b"NFT (unverified)");
+                let label: &[u8] = if nft_info.verified() {
+                    verified
+                } else {
+                    unverified
+                };
                 title[..label.len()].copy_from_slice(label);
                 nft_info.render_collection_name(message, page)
             }
@@ -505,8 +584,7 @@ impl<'b> ERC721<'b> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
-        // valid as at this point it was checked
-        let nft_info = ERC721Info::get_nft_info().apdu_unwrap();
+        let nft_info = ERC721Info::nft_info_for_render()?;
 
         match item_n {
             0 => {
@@ -522,7 +600,14 @@ impl<'b> ERC721<'b> {
                 this.controller.render_eth_address(message, page)
             }
             1 => {
-                let label = pic_str!(b"To Manage ALL");
+                // the name is the host's unless Ledger signed it
+                let verified = pic_str!(b"To Manage ALL");
+                let unverified = pic_str!(b"ALL (unverified)");
+                let label: &[u8] = if nft_info.verified() {
+                    verified
+                } else {
+                    unverified
+                };
                 title[..label.len()].copy_from_slice(label);
                 nft_info.render_collection_name(message, page)
             }

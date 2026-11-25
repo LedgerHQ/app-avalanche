@@ -24,8 +24,9 @@ use crate::{
     constants::chain_alias_lookup,
     handlers::handle_ui_message,
     parser::{
-        BaseTxFields, ChainId, DisplayableItem, FromBytes, Header, ObjectList, Output, ParserError,
-        TransferableInput, TransferableOutput, BLOCKCHAIN_ID_LEN, MAX_ADDRESS_ENCODED_LEN,
+        sum_input_amounts_in, BaseTxFields, ChainId, DisplayableItem, FromBytes, Header,
+        ObjectList, Output, OutputLock, ParserError, TransferableInput, TransferableOutput,
+        BLOCKCHAIN_ID_LEN,
     },
 };
 
@@ -41,7 +42,7 @@ const IMPORT_DESCRIPTION_LEN: usize = 8;
 #[cfg_attr(test, derive(Debug))]
 pub struct BaseImport<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     pub tx_header: Header<'b>,
     pub base_tx: BaseTxFields<'b, O>,
@@ -51,7 +52,7 @@ where
 
 impl<'b, O> FromBytes<'b> for BaseImport<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     #[inline(never)]
     fn from_bytes_into(
@@ -65,7 +66,11 @@ where
 
         // base_tx
         let base_tx = unsafe { &mut *addr_of_mut!((*out).base_tx).cast() };
-        let rem = BaseTxFields::<O>::from_bytes_into(rem, base_tx)?;
+        let rem = BaseTxFields::<O>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_tx,
+        )?;
 
         let (rem, source_chain) = take(SOURCE_CHAIN_LEN)(rem)?;
         let source_chain = arrayref::array_ref!(source_chain, 0, SOURCE_CHAIN_LEN);
@@ -95,7 +100,7 @@ where
 
 impl<'b, O> BaseImport<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     pub fn disable_output_if(&mut self, address: &[u8]) {
         self.base_tx.disable_output_if(address);
@@ -132,13 +137,8 @@ where
     fn sum_inputs_amount(&self) -> Result<u64, ParserError> {
         let base_inputs = self.base_tx.sum_inputs_amount()?;
 
-        let import_inputs = self
-            .inputs
-            .iter()
-            .map(|input| input.amount().ok_or(ParserError::UnexpectedError))
-            .try_fold(0u64, |acc, x| {
-                acc.checked_add(x?).ok_or(ParserError::OperationOverflows)
-            })?;
+        // AVAX only, as the fee is paid in AVAX
+        let import_inputs = sum_input_amounts_in(&self.inputs, self.tx_header.avax_asset_id())?;
 
         import_inputs
             .checked_add(base_inputs)
@@ -171,41 +171,12 @@ where
         page: u8,
     ) -> Result<u8, zemu_sys::ViewError> {
         let (obj, obj_item_n) = self.get_output_with_item(item_n)?;
-        // Base Import/Export only supports secp_transfer types
-        let obj = (*obj).secp_transfer().ok_or(ViewError::NoData)?;
+        // Import/Export only supports secp_transfer types
+        let _ = obj.output().secp_transfer().ok_or(ViewError::NoData)?;
 
-        // get the number of items for the obj wrapped up by PvmOutput
-        let num_inner_items = obj.num_items()?;
-
-        // do a custom rendering of the first base_output_items
-        match obj_item_n {
-            0 => {
-                // render amount
-                obj.render_item(0, title, message, page)
-            }
-            // address rendering, according to avax team 99.99% of transactions only comes with one
-            // address, but we support rendering any
-            x @ 1.. if x < num_inner_items => {
-                // get the address index
-                let address_idx = x - 1;
-                let address = obj
-                    .get_address_at(address_idx as usize)
-                    .ok_or(ViewError::NoData)?;
-                // render encoded address with proper hrp,
-                let t = pic_str!(b"Address");
-                title[..t.len()].copy_from_slice(t);
-
-                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
-                let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
-
-                let addr_len = address
-                    .encode_into(hrp, &mut encoded[..])
-                    .map_err(|_| ViewError::Unknown)?;
-
-                handle_ui_message(&encoded[..addr_len], message, page)
-            }
-            _ => Err(ViewError::NoData),
-        }
+        let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+        let avax = self.tx_header.avax_asset_id();
+        obj.render_item_with_hrp(hrp, avax, obj_item_n, title, message, page)
     }
 
     pub fn render_import_description(

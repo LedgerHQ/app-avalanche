@@ -24,7 +24,15 @@ use zemu_sys::ViewError;
 use crate::{
     checked_add,
     handlers::handle_ui_message,
-    parser::{nano_avax_to_fp_str, Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES, U64_FORMATTED_SIZE},
+    parser::{
+        nano_avax_to_fp_str,
+        outputs::{
+            address_items, check_locktime, check_threshold, render_locktime, render_no_owner,
+            render_threshold, shows_threshold,
+        },
+        Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES,
+        U64_FORMATTED_SIZE,
+    },
 };
 
 const AVAX_TO_LEN: usize = 9; //b" AVAX to "
@@ -78,9 +86,12 @@ impl<'b> FromBytes<'b> for SECPTransferOutput<'b> {
         let addresses =
             bytemuck::try_cast_slice(addresses).map_err(|_| ParserError::InvalidAddressLength)?;
 
-        if (threshold as usize > addresses.len()) || (addresses.is_empty() && threshold != 0) {
-            return Err(ParserError::InvalidThreshold.into());
-        }
+        // threshold 0 is accepted and shown, see check_threshold
+        check_threshold(threshold, addresses.len())?;
+
+        // A non-zero locktime is shown as a date, so refuse one the date
+        // formatter cannot represent here rather than failing to render it.
+        check_locktime(locktime)?;
 
         //good ptr and no uninit reads
         let out = out.as_mut_ptr();
@@ -101,8 +112,16 @@ impl DisplayableItem for SECPTransferOutput<'_> {
         // we should summarize the items to show. As they suggested we only show the amount
         // and address. Legacy app errors if there is more than 1 address, in our case we dont yet.
         //
-        // amount and addresses
-        checked_add!(ViewError::Unknown, 1u8, self.addresses.len() as u8)
+        // amount, addresses (or the "anyone can spend" screen when there is
+        // none) and, with several addresses, the threshold, and when the
+        // output is time-locked, the date it unlocks
+        checked_add!(
+            ViewError::Unknown,
+            1u8,
+            address_items(self.addresses.len()),
+            shows_threshold(self.threshold, self.addresses.len()) as u8,
+            (self.locktime != 0) as u8
+        )
     }
 
     fn render_item(
@@ -132,7 +151,11 @@ impl SECPTransferOutput<'_> {
         use bolos::{pic_str, PIC};
 
         let mut buffer = [0; U64_FORMATTED_SIZE + 2 + AVAX_TO_LEN];
-        let addr_item_n = self.num_items()? - self.addresses.len() as u8;
+        // amount first, then the addresses, the threshold and the locktime
+        let addr_item_n = 1u8;
+        let threshold_item_n = addr_item_n + address_items(self.addresses.len());
+        let shows_threshold = shows_threshold(self.threshold, self.addresses.len());
+        let locktime_item_n = threshold_item_n + shows_threshold as u8;
 
         match item_n {
             0 => {
@@ -151,10 +174,28 @@ impl SECPTransferOutput<'_> {
                 handle_ui_message(&buffer[..(len + avax_to.len())], message, page)
             }
 
-            x @ 1.. if x >= addr_item_n => {
+            // Threshold 0 with no address: anyone can spend the output with no
+            // signature. It used to show an amount with no recipient.
+            1 if self.addresses.is_empty() => render_no_owner(
+                pic_str!(b"Address"),
+                pic_str!(b"Anyone can spend"),
+                title,
+                message,
+                page,
+            ),
+            x @ 1.. if x < threshold_item_n => {
                 let idx = x - addr_item_n;
                 let addr = self.get_address_at(idx as usize).ok_or(ViewError::NoData)?;
                 addr.render_with_hrp(hrp, title, message, page)
+            }
+            x if x == threshold_item_n && shows_threshold => {
+                render_threshold(self.threshold, self.addresses.len(), title, message, page)
+            }
+            // The output cannot be spent before this date. Without the screen
+            // funds sent to the user, or their change, could be locked for
+            // years and the review would look the same.
+            x if x == locktime_item_n && self.locktime != 0 => {
+                render_locktime(pic_str!(b"Locked until"), self.locktime, title, message, page)
             }
             _ => Err(ViewError::NoData),
         }
@@ -212,6 +253,125 @@ mod tests {
 
         let output = SECPTransferOutput::from_bytes(&raw_output).unwrap_err();
         assert_eq!(output, ParserError::InvalidThreshold.into());
+    }
+
+    #[test]
+    fn parse_secp256k1_output_accepts_threshold_zero() {
+        use crate::parser::tx_builder::{render_all, secp_out, RECIPIENT};
+        use std::prelude::v1::*;
+
+        // No addresses: valid on-chain and anyone can spend it with no
+        // signature. It is accepted, as it always was, and says so instead of
+        // showing an amount with no recipient.
+        let raw = secp_out(1_000_000_000, 4_102_444_800, 0, &[]);
+        let (_, anyone) = SECPTransferOutput::from_bytes(&raw).unwrap();
+        assert_eq!(
+            render_all(&anyone),
+            [
+                "Amount: 1 AVAX to ",
+                "Address: Anyone can spend",
+                "Locked until: 2100-01-01 00:00:00 UTC",
+            ]
+        );
+
+        // With addresses avalanchego refuses it as unoptimized; it was
+        // accepted and still is, and its threshold is shown.
+        let raw = secp_out(1_000, 0, 0, &[RECIPIENT]);
+        let (_, zero_of_one) = SECPTransferOutput::from_bytes(&raw).unwrap();
+        let screens = render_all(&zero_of_one);
+        assert_eq!(screens.len(), 3, "{:#?}", screens);
+        assert!(screens[1].starts_with("Address: "));
+        assert_eq!(screens[2], "Threshold: 0 of 1");
+
+        // a threshold no set of signatures can meet is still refused
+        let err = SECPTransferOutput::from_bytes(&secp_out(1_000, 0, 1, &[])).unwrap_err();
+        assert_eq!(err, ParserError::InvalidThreshold.into());
+    }
+
+    #[test]
+    fn anyone_can_spend_output_is_shown_and_never_hidden() {
+        use crate::parser::tx_builder::*;
+        use crate::parser::{AvmOutput, Transaction, TransferableOutput};
+        use std::prelude::v1::*;
+
+        let anyone = transferable(&FUJI_AVAX, secp_out(89_999_000_000, 0, 0, &[]));
+        let ins = [input(1, &FUJI_AVAX, 100_000_000_000)];
+        let tx = x_transfer(&[out(10_000_000_000, RECIPIENT), anyone.clone()], &ins);
+
+        assert!(Transaction::new(&tx).is_ok());
+        // Not change, whatever the change address: change must be unlocked
+        // AVAX with a single owner and threshold 1.
+        let (_, output) = TransferableOutput::<AvmOutput>::from_bytes(&anyone).unwrap();
+        for change in [CHANGE, RECIPIENT, [0; 20]] {
+            assert!(!output.is_hideable_change(&change, Some(&FUJI_AVAX)));
+        }
+
+        // Shown, with its amount, whichever change addresses are filtered
+        // (and even when every other output is hidden as change).
+        for change in [&[][..], &[CHANGE], &[RECIPIENT], &[RECIPIENT, CHANGE]] {
+            let shown = screens_with_change(&tx, change);
+            let at = shown
+                .iter()
+                .position(|s| s == "Address: Anyone can spend")
+                .unwrap_or_else(|| panic!("{:#?}", shown));
+            assert!(shown[at - 1].ends_with(": 89.999 AVAX to "), "{:#?}", shown);
+        }
+    }
+
+    #[test]
+    fn anyone_can_spend_stake_output_shows_its_lock() {
+        use crate::parser::tx_builder::*;
+        use std::prelude::v1::*;
+
+        // A stakeable-locked stake output nobody owns: amount, the "anyone"
+        // screen, its locktime and the stakeable-lock date all show.
+        let ins = [input(1, &FUJI_AVAX, 3_000_000_000_000)];
+        let inner = secp_out(2_000_000_000_000, 1_000_000_000, 0, &[]);
+        let stake = [transferable(
+            &FUJI_AVAX,
+            stakeable_locked(4_102_444_800, inner),
+        )];
+        let tx = add_delegator(&[], &ins, &stake, owners(0, 1, &[CHANGE]));
+        let shown = screens(&tx, None);
+        let at = shown
+            .iter()
+            .position(|s| s == "Address: Anyone can spend")
+            .unwrap_or_else(|| panic!("{:#?}", shown));
+        assert!(shown[at - 1].ends_with(": 2000 AVAX to "), "{:#?}", shown);
+        assert_eq!(shown[at + 1], "Locked until: 2001-09-09 01:46:40 UTC");
+        assert_eq!(
+            shown[at + 2],
+            "Funds locked: 2000 AVAX until 2100-01-01 00:00:00 UTC"
+        );
+    }
+
+    #[test]
+    fn multisig_output_shows_its_threshold() {
+        use crate::parser::tx_builder::*;
+        use std::prelude::v1::*;
+
+        // A 1-of-2 output to [recipient, attacker] let the attacker spend it
+        // alone, and looked exactly like the 2-of-2 one.
+        let ins = [input(1, &FUJI_AVAX, 100_000_000_000)];
+        let tx = |threshold| {
+            x_transfer(
+                &[transferable(
+                    &FUJI_AVAX,
+                    secp_out(10_000_000_000, 0, threshold, &[RECIPIENT, ATTACKER]),
+                )],
+                &ins,
+            )
+        };
+        let one_of_two = screens(&tx(1), None);
+        let two_of_two = screens(&tx(2), None);
+
+        assert_ne!(one_of_two, two_of_two);
+        assert!(one_of_two.contains(&"Threshold: 1 of 2".to_string()));
+        assert!(two_of_two.contains(&"Threshold: 2 of 2".to_string()));
+
+        // With a single address the threshold can only be 1: no screen.
+        let single = x_transfer(&[out(10_000_000_000, RECIPIENT)], &ins);
+        assert!(!screens(&single, None).iter().any(|s| s.starts_with("Threshold")));
     }
 
     #[test]

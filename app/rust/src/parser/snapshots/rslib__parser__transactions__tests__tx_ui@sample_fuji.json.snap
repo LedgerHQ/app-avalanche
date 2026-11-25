@@ -1,7 +1,7 @@
 ---
-source: app/src/parser/transactions.rs
+source: src/parser/transactions.rs
 expression: reduced
-input_file: app/src/parser/testvectors/sample_fuji.json
+input_file: src/parser/testvectors/sample_fuji.json
 ---
 [
     "Transfer": "Transaction",
@@ -10,5 +10,5 @@ input_file: app/src/parser/testvectors/sample_fuji.json
     "Transfer": "0.006999 AVAX to ",
     "Address": "fuji15jh6hlessx2jtxvs48jnr0vzxrg34x32vuc7jc",
     "Fee(AVAX)": "0.001",
-    "Memo": "00000000",
+    "Memo": "0x00000000",
 ]

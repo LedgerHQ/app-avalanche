@@ -38,6 +38,9 @@ __Z_INLINE void clean_up_eth_globals() { _clean_up_eth(); }
 __Z_INLINE void app_sign_hash(uint8_t curve_type) {
     zemu_log("app_sign_hash\n");
 
+    // The signature is written over G_io_apdu_buffer, so read P1 first.
+    const uint8_t p1 = G_io_apdu_buffer[OFFSET_P1];
+
     uint32_t path[HDPATH_LEN_DEFAULT] = {0};
     uint8_t hash[CX_SHA256_SIZE] = {0};
 
@@ -89,7 +92,7 @@ __Z_INLINE void app_sign_hash(uint8_t curve_type) {
         io_exchange(CHANNEL_APDU | IO_RETURN_AFTER_TX, 2);
     } else {
         // ensure we clean paths and hashes
-        if (G_io_apdu_buffer[OFFSET_P1] == LAST_MESSAGE) {
+        if (p1 == LAST_MESSAGE) {
             clean_up_hash_globals();
         }
 
@@ -158,6 +161,15 @@ __Z_INLINE void app_sign_msg() {
 // no change paths list at the begining
 __Z_INLINE void app_sign_hash_review() {
     zemu_log_stack("app_sign_hash_review");
+
+    // The hash was stored when the request was parsed, so the review could
+    // show it; only the user's approval here makes it signable.
+    if (_approve_sign_hash() != zxerr_ok) {
+        clean_up_hash_globals();
+        set_code(G_io_apdu_buffer, 0, APDU_CODE_EXECUTION_ERROR);
+        io_exchange(CHANNEL_APDU | IO_RETURN_AFTER_TX, 2);
+        return;
+    }
 
     // we are just returning the CODE_OK
     // the hash signature would be returned in the next stage.

@@ -1,0 +1,23 @@
+---
+source: src/parser/transactions.rs
+expression: reduced
+input_file: src/parser/testvectors/x_create_asset_mint.json
+---
+[
+    "CreateAsset": "Transaction",
+    "Asset Name": "Volatility Index",
+    "Asset symbol": "VIX",
+    "Denomination": "2",
+    "Output": "SECPMint",
+    "Threshold": "1",
+    "Address": "fuji1t293cv98hrjdrshk48st84x976nm3jwsuhulsy",
+    "Supply": "1000 VIX to ",
+    "Address": "fuji1crl7uqxqllhqps8lacqvpllwqrq0lmsq8uqw5w",
+    "Amount": "12345 units of asset 16qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9cWcm5W to ",
+    "Address": "fuji12yp9cc0melq83a5nxnurf0nd6fk4t224unmnwx",
+    "Address": "fuji1cv6yz28qvqfgah34yw3y53su39p6kzzehw5pj3",
+    "Threshold": "1 of 2",
+    "Locked until": "1970-01-01 15:05:21 UTC",
+    "Fee(AVAX)": "0",
+    "Memo": "0x00010203",
+]

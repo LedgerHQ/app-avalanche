@@ -111,6 +111,10 @@ impl Sign {
 
             tx.disable_output_if(&address[..]);
         }
+
+        // never leave the review without a single output
+        tx.show_outputs_if_all_hidden();
+
         Ok(())
     }
 
@@ -205,6 +209,7 @@ impl Viewable for SignUI {
             crate::lock_mut!(PATH).lock(SignHash);
             crate::lock_mut!(HASH).lock(SignHash);
         }
+        crate::handlers::avax::sign_hash::mark_hash_approved();
 
         (tx, Error::Success as _)
     }

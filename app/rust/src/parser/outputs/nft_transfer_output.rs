@@ -25,6 +25,10 @@ use crate::{
     checked_add,
     handlers::handle_ui_message,
     parser::{
+        outputs::{
+            address_items, check_locktime, check_threshold, render_locktime, render_no_owner,
+            render_threshold, shows_threshold,
+        },
         u32_to_str, Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES,
         U32_FORMATTED_SIZE,
     },
@@ -91,9 +95,11 @@ impl<'b> NFTTransferOutput<'b> {
         let addresses =
             bytemuck::try_cast_slice(addresses).map_err(|_| ParserError::InvalidAddressLength)?;
 
-        if (threshold as usize > addresses.len()) || (addresses.is_empty() && threshold != 0) {
-            return Err(ParserError::InvalidThreshold.into());
-        }
+        // threshold 0 is accepted and shown, see check_threshold
+        check_threshold(threshold, addresses.len())?;
+
+        // the locktime is shown as a date
+        check_locktime(locktime)?;
 
         //good ptr and no uninit reads
         let out = out.as_mut_ptr();
@@ -126,8 +132,16 @@ impl<'b> FromBytes<'b> for NFTTransferOutput<'b> {
 
 impl DisplayableItem for NFTTransferOutput<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        // group_id, payload and addresses
-        checked_add!(ViewError::Unknown, 2u8, self.num_addresses() as u8)
+        // group_id, payload, addresses (or the "anyone can spend" screen when
+        // there is none) and, with several, the threshold, and when the NFT
+        // is time-locked, the date it unlocks
+        checked_add!(
+            ViewError::Unknown,
+            2u8,
+            address_items(self.num_addresses()),
+            shows_threshold(self.threshold, self.num_addresses()) as u8,
+            (self.locktime != 0) as u8
+        )
     }
 
     #[inline(never)]
@@ -157,6 +171,8 @@ impl NFTTransferOutput<'_> {
         use bolos::{pic_str, PIC};
 
         let mut buffer = [0; U32_FORMATTED_SIZE + 2];
+        let threshold_item_n = 2 + address_items(self.num_addresses()) as usize;
+        let shows_threshold = shows_threshold(self.threshold, self.num_addresses());
 
         match item_n as usize {
             0 => {
@@ -178,7 +194,12 @@ impl NFTTransferOutput<'_> {
                 let mut buf = [0; SHOW_PAYLOAD_LEN + 4 + 2]; // suffix and preffix
                 let mut len = self.payload.len();
 
-                if self.payload.is_ascii() {
+                // Only printable ASCII goes through as text: a NUL used to
+                // end the payload shown early, and control bytes reached the
+                // screen raw. Anything else is shown as hex, 0x-prefixed, and
+                // so is text starting with "0x", which would look like hex.
+                let printable = self.payload.iter().all(|c| (0x20..0x7f).contains(c));
+                if printable && !self.payload.starts_with(b"0x") {
                     if len > SHOW_PAYLOAD_LEN {
                         show_suffix = true;
                         len = SHOW_PAYLOAD_LEN;
@@ -207,7 +228,16 @@ impl NFTTransferOutput<'_> {
                 }
                 handle_ui_message(&buf[..len], message, page)
             }
-            x @ 2.. if x < self.num_addresses() + 2 => {
+            // Threshold 0 with no address: anyone can take the NFT with no
+            // signature.
+            2 if self.addresses.is_empty() => render_no_owner(
+                pic_str!(b"Owner: "),
+                pic_str!(b"Anyone can spend"),
+                title,
+                message,
+                page,
+            ),
+            x @ 2.. if x < threshold_item_n => {
                 let idx = x - 2;
                 if let Some(addr) = self.get_address_at(idx) {
                     let res = addr.render_with_hrp(hrp, title, message, page);
@@ -219,6 +249,19 @@ impl NFTTransferOutput<'_> {
                 } else {
                     Err(ViewError::NoData)
                 }
+            }
+            x if x == threshold_item_n && shows_threshold => {
+                render_threshold(self.threshold, self.num_addresses(), title, message, page)
+            }
+            // the NFT cannot move before this date; it used to go unshown
+            x if x == threshold_item_n + shows_threshold as usize && self.locktime != 0 => {
+                render_locktime(
+                    pic_str!(b"Locked until"),
+                    self.locktime,
+                    title,
+                    message,
+                    page,
+                )
             }
             _ => Err(ViewError::NoData),
         }
@@ -235,6 +278,50 @@ mod tests {
         22, 54, 119, 75, 103, 131, 141, 236, 22, 225, 106, 182, 207, 172, 178, 27, 136, 195, 168,
         97,
     ];
+
+    #[test]
+    fn multisig_nft_output_shows_its_threshold() {
+        use crate::parser::tx_builder::{render_all, ATTACKER, RECIPIENT};
+        use std::prelude::v1::*;
+
+        let mut data = vec![0, 0, 0, 11, 0, 0, 0, 1, 0, 0, 0, 2, b'h', b'i'];
+        data.extend(0u64.to_be_bytes());
+        data.extend(1u32.to_be_bytes());
+        data.extend(2u32.to_be_bytes());
+        data.extend(RECIPIENT);
+        data.extend(ATTACKER);
+
+        let out = NFTTransferOutput::from_bytes(&data).unwrap().1;
+        assert_eq!(out.num_items().unwrap(), 5);
+        assert_eq!(render_all(&out).last().unwrap(), "Threshold: 1 of 2");
+    }
+
+    #[test]
+    fn payload_with_control_bytes_is_shown_as_hex() {
+        use crate::parser::tx_builder::{render_all, RECIPIENT};
+        use std::prelude::v1::*;
+
+        // "ab\0cd": the NUL passed is_ascii and ended the payload shown at "ab"
+        let mut data = vec![0, 0, 0, 11, 0, 0, 0, 1, 0, 0, 0, 5];
+        data.extend(b"ab\0cd");
+        data.extend(0u64.to_be_bytes());
+        data.extend(1u32.to_be_bytes());
+        data.extend(1u32.to_be_bytes());
+        data.extend(RECIPIENT);
+
+        let out = NFTTransferOutput::from_bytes(&data).unwrap().1;
+        assert_eq!(render_all(&out)[1], "Payload: : 0x6162006364");
+
+        // and text that looks like hex is shown as hex
+        let mut data = vec![0, 0, 0, 11, 0, 0, 0, 1, 0, 0, 0, 4];
+        data.extend(b"0x01");
+        data.extend(0u64.to_be_bytes());
+        data.extend(1u32.to_be_bytes());
+        data.extend(1u32.to_be_bytes());
+        data.extend(RECIPIENT);
+        let out = NFTTransferOutput::from_bytes(&data).unwrap().1;
+        assert_eq!(render_all(&out)[1], "Payload: : 0x30783031");
+    }
 
     #[test]
     fn parse_nft_transf_output() {
