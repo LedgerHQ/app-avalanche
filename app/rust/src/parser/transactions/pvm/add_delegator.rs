@@ -23,9 +23,9 @@ use crate::{
     checked_add,
     handlers::handle_ui_message,
     parser::{
-        nano_avax_to_fp_str, BaseTxFields, DisplayableItem, FromBytes, Header, ObjectList,
+        nano_avax_to_fp_str, sum_amounts_in, BaseTxFields, DisplayableItem, FromBytes, Header, ObjectList,
         OutputIdx, ParserError, PvmOutput, SECPOutputOwners, Stake, TransferableOutput, Validator,
-        MAX_ADDRESS_ENCODED_LEN, PVM_ADD_DELEGATOR, U64_FORMATTED_SIZE,
+        PVM_ADD_DELEGATOR, U64_FORMATTED_SIZE,
     },
 };
 
@@ -64,7 +64,11 @@ impl<'b> FromBytes<'b> for AddDelegatorTx<'b> {
 
         // base_tx
         let base_tx = unsafe { &mut *addr_of_mut!((*out).base_tx).cast() };
-        let rem = BaseTxFields::<PvmOutput>::from_bytes_into(rem, base_tx)?;
+        let rem = BaseTxFields::<PvmOutput>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_tx,
+        )?;
 
         // validator
         let validator = unsafe { &mut *addr_of_mut!((*out).validator).cast() };
@@ -112,17 +116,16 @@ impl DisplayableItem for AddDelegatorTx<'_> {
         // rewards_to, stake items and fee
         //
         let validator_items = self.validator.num_items()?;
-        let rewards_items = self.rewards_owner.addresses.len() as u8;
         let base_outputs = self.base_tx.base_outputs_num_items()?;
         let stake_items = self.num_stake_items()?;
 
         checked_add!(
             ViewError::Unknown,
-            2u8,
+            1u8,
             validator_items,
-            rewards_items,
             base_outputs,
-            stake_items
+            stake_items,
+            self.num_last_items()?
         )
     }
 
@@ -136,8 +139,7 @@ impl DisplayableItem for AddDelegatorTx<'_> {
         let validator_items = self.validator.num_items()?;
         let base_outputs_items = self.base_tx.base_outputs_num_items()?;
         let stake_outputs_items = self.num_stake_items()?;
-
-        let total_items = self.num_items()?;
+        let last_items = self.num_last_items()?;
 
         match_ranges! {
             match item_n alias x {
@@ -150,7 +152,7 @@ impl DisplayableItem for AddDelegatorTx<'_> {
                 until base_outputs_items => self.render_base_outputs(x, title, message, page),
                 until validator_items => self.validator.render_item(x, title, message, page),
                 until stake_outputs_items => self.render_stake_outputs(x, title, message, page),
-                until total_items => self.render_last_items(x, title, message, page),
+                until last_items => self.render_last_items(x, title, message, page),
                 _ => Err(ViewError::NoData),
             }
         }
@@ -167,16 +169,17 @@ impl<'b> AddDelegatorTx<'b> {
 
         let mut idx = 0;
         let mut render = self.renderable_out;
+        let avax = self.tx_header.avax_asset_id();
 
         // stake is defined as an Object List of TransferableOutputs,
         // when parsing transactions we ensure that it is not longer than
         // 64, as we use that value as a limit for the bitwise operation,
-        // this ensures that render ^= 1 << idx never overflows.
+        // this ensures that 1 << idx never overflows.
         self.stake.iterate_with(|o| {
-            // The 99.99% of the outputs contain only one address(best case),
-            // In the worse case we just show every output.
-            if o.num_addresses() == 1 && o.contain_address(address) {
-                render ^= 1 << idx;
+            if o.is_hideable_change(address, avax) {
+                // clear the bit: toggling it would show the output
+                // again when a second change path matched it too
+                render &= !(1 << idx);
             }
             idx += 1;
         });
@@ -187,7 +190,8 @@ impl<'b> AddDelegatorTx<'b> {
         let sum_inputs = self.base_tx.sum_inputs_amount()?;
 
         let base_outputs = self.base_tx.sum_outputs_amount()?;
-        let stake_outputs = Self::sum_stake_outputs_amount(&self.stake)?;
+        // AVAX only, as the fee is paid in AVAX
+        let stake_outputs = sum_amounts_in(&self.stake, self.tx_header.avax_asset_id())?;
 
         let total_outputs = base_outputs
             .checked_add(stake_outputs)
@@ -210,7 +214,7 @@ impl<'b> AddDelegatorTx<'b> {
         // stake is defined as an Object List of TransferableOutputs,
         // when parsing transactions we ensure that it is not longer than
         // 64, as we use that value as a limit for the bitwise operation,
-        // this ensures that render ^= 1 << idx never overflows.
+        // this ensures that 1 << idx never overflows.
         self.stake.iterate_with(|o| {
             let render = self.renderable_out & (1 << idx);
             if render > 0 {
@@ -287,50 +291,17 @@ impl<'b> AddDelegatorTx<'b> {
         //  Funds locked:
         //      0.5 AVAX until 2021-05-31 21:28:00 UTC
 
-        // get the number of items for the obj wrapped up by PvmOutput
-        let num_inner_items = obj.output.num_inner_items()?;
+        let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+        let avax = self.tx_header.avax_asset_id();
+        let res = obj.render_item_with_hrp(hrp, avax, item_n, title, message, page);
 
-        // do a custom rendering of the first base_output_items
-        match item_n {
-            0 => {
-                title[..header.len()].copy_from_slice(header);
-
-                // render using default obj impl
-                let res = obj.render_item(0, title, message, page);
-
-                // customize the label
-                title.iter_mut().for_each(|v| *v = 0);
-                title[..header.len()].copy_from_slice(header);
-
-                res
-            }
-            // address rendering, according to avax team 99.99% of transactions only comes with one
-            // address, but we support rendering any
-            x @ 1.. if x < num_inner_items => {
-                // get the address index
-                let address_idx = x - 1;
-                let address = obj
-                    .output
-                    .get_address_at(address_idx as usize)
-                    .ok_or(ViewError::NoData)?;
-                // render encoded address with proper hrp,
-                let t = pic_str!(b"Address");
-                title[..t.len()].copy_from_slice(t);
-
-                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
-                let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
-
-                let addr_len = address
-                    .encode_into(hrp, &mut encoded[..])
-                    .map_err(|_| ViewError::Unknown)?;
-
-                handle_ui_message(&encoded[..addr_len], message, page)
-            }
-            // by default we call the objects impl here,
-            // if it is a locked output, that info will be shown otherwise,
-            // this returns an error
-            _ => obj.render_item(item_n, title, message, page),
+        // 'Transfer' or 'Stake' instead of 'Amount'
+        if item_n == 0 {
+            title.iter_mut().for_each(|v| *v = 0);
+            title[..header.len()].copy_from_slice(header);
         }
+
+        res
     }
 
     fn sum_stake_outputs_amount(
@@ -343,20 +314,25 @@ impl<'b> AddDelegatorTx<'b> {
             .ok_or(ParserError::OperationOverflows)
     }
 
+    // the rewards owner's screens: its addresses, the locktime and the
+    // threshold where they apply
     fn render_rewards_to(
         &self,
-        addr_idx: usize,
+        item_n: u8,
         title: &mut [u8],
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, zemu_sys::ViewError> {
         let label = pic_str!(b"Rewards to");
-        title[..label.len()].copy_from_slice(label);
-
-        // render owner addresses
         let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
         self.rewards_owner
-            .render_address_with_hrp(hrp, addr_idx, message, page)
+            .render_item_with_label(hrp, label, item_n, title, message, page)
+    }
+
+    // rewards owner addresses and the fee
+    fn num_last_items(&self) -> Result<u8, ViewError> {
+        let rewards_items = self.rewards_owner.num_items()?;
+        checked_add!(ViewError::Unknown, rewards_items, 1u8)
     }
 
     fn render_last_items(
@@ -368,13 +344,13 @@ impl<'b> AddDelegatorTx<'b> {
     ) -> Result<u8, zemu_sys::ViewError> {
 
         let mut buffer = [0; U64_FORMATTED_SIZE + 2];
-        let num_addresses = self.rewards_owner.addresses.len() as u8;
+        let rewards_items = self.rewards_owner.num_items()?;
 
         match_ranges! {
             match item_n alias x {
                 // render rewards
-                until num_addresses => {
-                    self.render_rewards_to(x as usize, title, message, page)
+                until rewards_items => {
+                    self.render_rewards_to(x, title, message, page)
                 }
                 until 1 => {
                     let label = pic_str!(b"Fee(AVAX)");
@@ -471,5 +447,112 @@ mod tests {
     fn parse_add_delegator() {
         let (_, tx) = AddDelegatorTx::from_bytes(DATA).unwrap();
         assert_eq!(tx.validator.stake(), 2000000000000);
+    }
+
+    #[test]
+    fn locked_change_and_stake_are_not_hidden() {
+        use crate::parser::tx_builder::*;
+        use std::prelude::v1::*;
+
+        // 2100-01-01 00:00:00 UTC
+        const YEAR_2100: u64 = 4_102_444_800;
+        let ins = [input(1, &FUJI_AVAX, 100_000_000_000)];
+        let rewards = || owners(0, 1, &[CHANGE]);
+
+        let honest = add_delegator(
+            &[out(89_999_000_000, CHANGE)],
+            &ins,
+            &[out(10_000_000_000, CHANGE)],
+            rewards(),
+        );
+        // The lone change output stakeable-locked until 2100, and the stake
+        // coming back time-locked until 2100: both used to be hidden as
+        // change, so the review was the same as the honest one.
+        let attack = add_delegator(
+            &[transferable(
+                &FUJI_AVAX,
+                stakeable_locked(YEAR_2100, secp_out(89_999_000_000, 0, 1, &[CHANGE])),
+            )],
+            &ins,
+            &[transferable(&FUJI_AVAX, secp_out(10_000_000_000, YEAR_2100, 1, &[CHANGE]))],
+            rewards(),
+        );
+
+        let honest = screens(&honest, Some(CHANGE));
+        let attack = screens(&attack, Some(CHANGE));
+        assert!(!honest.iter().any(|s| s.contains("until")), "{:#?}", honest);
+        assert_ne!(honest, attack);
+
+        assert!(attack.contains(&"Transfer: 89.999 AVAX to ".to_string()), "{:#?}", attack);
+        assert!(attack.contains(
+            &"Funds locked: 89.999 AVAX until 2100-01-01 00:00:00 UTC".to_string()
+        ));
+        assert!(attack.contains(&"Stake: 10 AVAX to ".to_string()), "{:#?}", attack);
+        assert!(attack.contains(&"Locked until: 2100-01-01 00:00:00 UTC".to_string()));
+    }
+
+    #[test]
+    fn honest_delegation_hides_change_and_stake() {
+        use crate::parser::tx_builder::*;
+        use std::prelude::v1::*;
+
+        // Change and stake both go back to the user. The rule that shows
+        // every output when the filter hid them all is for transfers only;
+        // here it would have re-shown both on every honest delegation.
+        let ins = [input(1, &FUJI_AVAX, 100_000_000_000)];
+        let tx = add_delegator(
+            &[out(89_999_000_000, CHANGE)],
+            &ins,
+            &[out(10_000_000_000, CHANGE)],
+            owners(0, 1, &[CHANGE]),
+        );
+        let shown = screens(&tx, Some(CHANGE));
+        assert!(!shown.iter().any(|s| s.starts_with("Transfer: ")), "{:#?}", shown);
+        assert!(!shown.iter().any(|s| s.starts_with("Stake: ")), "{:#?}", shown);
+        // the amount staked is still on screen
+        assert!(shown.contains(&"Total stake(AVAX): 10".to_string()), "{:#?}", shown);
+    }
+
+    #[test]
+    fn match_ranges_guard_does_not_overflow() {
+        // The guard of the second arm is x >= 200 && x < 200 + 100, which
+        // overflowed u8 before match_ranges! widened its arithmetic.
+        let (first, second) = (200u8, 100u8);
+        let arm = |item: u8| -> u8 {
+            match_ranges! {
+                match item alias x {
+                    until first => 0,
+                    until second => x + 1,
+                    _ => 0xff,
+                }
+            }
+        };
+        assert_eq!(arm(0), 0);
+        assert_eq!(arm(199), 0);
+        assert_eq!(arm(200), 1);
+        assert_eq!(arm(255), 56);
+    }
+
+    #[test]
+    fn many_items_render_without_overflow() {
+        use crate::parser::tx_builder::*;
+        use std::prelude::v1::*;
+
+        // Two base outputs with 64 addresses each put the start of the last
+        // range at item 137. The last arm was sized with the total item
+        // count, and match_ranges! added the two in u8, so rendering item 137
+        // panicked with "attempt to add with overflow".
+        let many: Vec<[u8; 20]> = (0..64u8).map(|i| [i; 20]).collect();
+        let outs = [
+            transferable(&FUJI_AVAX, secp_out(1_000, 0, 1, &many)),
+            transferable(&FUJI_AVAX, secp_out(2_000, 0, 1, &many)),
+        ];
+        let ins = [input(1, &FUJI_AVAX, 1_000_000_000)];
+        let stake = [out(500_000_000, CHANGE)];
+        let data = add_delegator(&outs, &ins, &stake, owners(0, 1, &[CHANGE]));
+
+        let screens = screens(&data, None);
+        assert!(screens.len() > 137);
+        assert!(screens.last().unwrap().starts_with("Fee(AVAX): "));
     }
 }

@@ -17,8 +17,7 @@ use crate::checked_add;
 use crate::handlers::handle_ui_message;
 use crate::parser::{
     nano_avax_to_fp_str, AvmOutput, BaseTxFields, ChainId, DisplayableItem, FromBytes, Header,
-    ObjectList, ParserError, TransferableOp, AVM_OPERATION_TX, MAX_ADDRESS_ENCODED_LEN,
-    U64_FORMATTED_SIZE,
+    ObjectList, ParserError, TransferableOp, AVM_OPERATION_TX, U64_FORMATTED_SIZE,
 };
 use core::{mem::MaybeUninit, ptr::addr_of_mut};
 use nom::bytes::complete::tag;
@@ -115,50 +114,18 @@ impl<'b> OperationTx<'b> {
             .base_output_with_item(item_n)
             .map_err(|_| ViewError::NoData)?;
 
-        // this is a secp_transfer so it contain
-        // 1 item amount
-        // x items which is one item for each address
-        let num_inner_items = obj.num_items()?;
+        let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+        let avax = self.base_tx.avax_asset_id();
+        let res = obj.render_item_with_hrp(hrp, avax, idx, title, message, page);
 
-        match idx {
-            0 => {
-                // render using default obj impl
-                let res = obj.render_item(0, title, message, page);
-
-                title.iter_mut().for_each(|v| *v = 0);
-
-                // customize the label
-                let label = pic_str!(b"Transfer");
-                title[..label.len()].copy_from_slice(label);
-
-                res
-            }
-
-            x @ 1.. if x < num_inner_items => {
-                let addr_idx = x - 1;
-                // Operations only supports secp_transfer outputs
-                let obj = obj.secp_transfer().ok_or(ViewError::NoData)?;
-
-                let address = obj
-                    .get_address_at(addr_idx as usize)
-                    .ok_or(ViewError::NoData)?;
-
-                // render encoded address with proper hrp,
-                let t = pic_str!(b"Address");
-                title[..t.len()].copy_from_slice(t);
-
-                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
-                let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
-
-                let addr_len = address
-                    .encode_into(hrp, &mut encoded[..])
-                    .map_err(|_| ViewError::Unknown)?;
-
-                handle_ui_message(&encoded[..addr_len], message, page)
-            }
-
-            _ => Err(ViewError::NoData),
+        // customize the label of the amount
+        if idx == 0 {
+            title.iter_mut().for_each(|v| *v = 0);
+            let label = pic_str!(b"Transfer");
+            title[..label.len()].copy_from_slice(label);
         }
+
+        res
     }
 }
 
@@ -185,7 +152,11 @@ impl<'b> FromBytes<'b> for OperationTx<'b> {
 
         // base_tx
         let base_tx = unsafe { &mut *addr_of_mut!((*out).base_tx).cast() };
-        let rem = BaseTxFields::<AvmOutput>::from_bytes_into(rem, base_tx)?;
+        let rem = BaseTxFields::<AvmOutput>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_tx,
+        )?;
 
         // operations
         let states = unsafe { &mut *addr_of_mut!((*out).operations).cast() };
@@ -304,5 +275,26 @@ mod tests {
     #[test]
     fn parse_operation_tx() {
         let (_, _tx) = OperationTx::from_bytes(DATA).unwrap();
+    }
+
+    #[test]
+    fn operation_shows_its_asset() {
+        use crate::parser::tx_builder::{screens, testvectors_path};
+        use std::prelude::v1::*;
+
+        // The asset an operation acts on was never shown: an NFT transfer
+        // of any collection the user holds reviewed the same.
+        let file = std::fs::File::open(testvectors_path("x_operation.json")).unwrap();
+        let data: Vec<u8> = serde_json::from_reader(file).unwrap();
+        let shown = screens(&data, None);
+        let op = shown
+            .iter()
+            .position(|s| s == "Op. Type:: NFTTransferOperation")
+            .expect("operation type screen");
+        // CB58 of the vector's asset id 0x000102..1f
+        assert_eq!(
+            shown[op + 1],
+            "Asset: 16qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9cWcm5W"
+        );
     }
 }

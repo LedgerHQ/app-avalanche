@@ -58,7 +58,11 @@ impl<'b> FromBytes<'b> for PvmBaseTx<'b> {
 
         // base_fields
         let base_fields = unsafe { &mut *addr_of_mut!((*out).base).cast() };
-        rem = BaseTxFields::<PvmOutput>::from_bytes_into(rem, base_fields)?;
+        rem = BaseTxFields::<PvmOutput>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_fields,
+        )?;
 
         Ok(rem)
     }

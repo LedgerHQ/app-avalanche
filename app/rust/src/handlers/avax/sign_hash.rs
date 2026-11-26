@@ -30,12 +30,32 @@ use crate::{
     handlers::{
         avax::verify_avax_root_path,
         handle_ui_message,
-        resources::{HASH, PATH},
+        resources::{HASHAccessors, HASH, HASH_APPROVED, PATH},
     },
     parser::{FromBytes, ParserError, PathWrapper},
     sys,
     utils::{convert_der_to_rs, ApduBufferRead},
 };
+
+// HASH alone is not proof of approval: the sign-hash flow stores the
+// requested hash as soon as FIRST_MESSAGE parses, so the review can show it.
+// Every signature must check HASH_APPROVED, which only an approve callback
+// sets and every new request or cleanup clears. It is a lazy_static resource
+// like HASH: a plain Rust static is not placed where the app expects.
+
+/// Record that the user approved the hash stored in HASH.
+pub fn mark_hash_approved() {
+    unsafe { *crate::lock_mut!(HASH_APPROVED).lock(HASHAccessors::SignHash) = true };
+}
+
+/// Forget any approval, before HASH changes or once it is released.
+pub fn clear_hash_approval() {
+    unsafe { *crate::lock_mut!(HASH_APPROVED).lock(HASHAccessors::SignHash) = false };
+}
+
+fn hash_approved() -> bool {
+    unsafe { *crate::lock_mut!(HASH_APPROVED).lock(HASHAccessors::SignHash) }
+}
 
 pub struct Sign;
 
@@ -51,11 +71,20 @@ impl Sign {
         }
     }
 
+    /// The stored hash, approved or not: what the review displays.
     pub fn get_hash() -> Result<&'static [u8; Self::SIGN_HASH_SIZE], Error> {
         match unsafe { crate::lock_mut!(HASH).acquire(Self) } {
             Ok(Some(some)) => Ok(some),
             _ => Err(Error::ApduCodeConditionsNotSatisfied),
         }
+    }
+
+    /// The stored hash, only once the user approved it: what may be signed.
+    pub fn get_approved_hash() -> Result<&'static [u8; Self::SIGN_HASH_SIZE], Error> {
+        if !hash_approved() {
+            return Err(Error::ApduCodeConditionsNotSatisfied);
+        }
+        Self::get_hash()
     }
 
     //(actual_size, [u8; MAX_SIGNATURE_SIZE])
@@ -94,6 +123,9 @@ impl Sign {
         let mut unsigned_hash = [0; Self::SIGN_HASH_SIZE];
         unsigned_hash.copy_from_slice(rem);
 
+        // The hash is stored now so the review can show it, but it is not
+        // approved: nothing may sign it until the user accepts the review.
+        clear_hash_approval();
         unsafe {
             crate::lock_mut!(PATH).lock(Self).replace(root_path);
             crate::lock_mut!(HASH).lock(Self).replace(unsigned_hash);
@@ -204,6 +236,7 @@ impl Viewable for SignUI {
         unsafe {
             crate::lock_mut!(HASH).lock(Sign).replace(self.hash);
         }
+        mark_hash_approved();
 
         (tx, Error::Success as _)
     }
@@ -262,7 +295,7 @@ impl Sign {
 
         // retrieve signing info
         let path_prefix = Sign::get_signing_info(cdata)?;
-        let hash = Self::get_hash()?;
+        let hash = Self::get_approved_hash()?;
 
         let (flags, sig_size, mut sig) = Sign::sign(&path_prefix, hash)?;
         let out = buffer.write();
@@ -308,6 +341,7 @@ impl Sign {
 }
 
 pub fn cleanup_globals() -> Result<(), Error> {
+    clear_hash_approval();
     unsafe {
         if let Ok(path) = crate::lock_mut!(PATH).acquire(Sign) {
             path.take();

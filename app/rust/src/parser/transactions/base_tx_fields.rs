@@ -13,7 +13,7 @@
 *  See the License for the specific language governing permissions and
 *  limitations under the License.
 ********************************************************************************/
-use bolos::{pic_str, PIC};
+use core::convert::TryFrom;
 use core::ops::Deref;
 
 use core::{mem::MaybeUninit, ptr::addr_of_mut};
@@ -21,17 +21,38 @@ use nom::{bytes::complete::take, number::complete::be_u32};
 use zemu_sys::ViewError;
 
 use crate::parser::{
-    DisplayableItem, FromBytes, ObjectList, Output, OutputIdx, ParserError, TransferableInput,
-    TransferableOutput, MAX_ADDRESS_ENCODED_LEN,
+    sum_amounts_in, sum_input_amounts_in, DisplayableItem, FromBytes, Header, NetworkId,
+    ObjectList, Output, OutputIdx, OutputLock, ParserError, TransferableInput, TransferableOutput,
 };
 
 pub const MAX_MEMO_LEN: usize = 256;
+
+/// How many of the outputs in `list` the change filter left visible in
+/// `mask`, and how many there are: (visible, total).
+pub fn output_visibility<'b, T>(list: &ObjectList<'b, T>, mask: OutputIdx) -> (usize, usize)
+where
+    T: FromBytes<'b> + 'b,
+{
+    let mut total = 0usize;
+    let mut visible = 0usize;
+
+    // output lists are capped at OutputIdx::BITS entries when parsed, so
+    // the shift never overflows
+    list.iterate_with(|_| {
+        if mask & (1 << total) != 0 {
+            visible += 1;
+        }
+        total += 1;
+    });
+
+    (visible, total)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, derive(Debug))]
 pub struct BaseTxFields<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     // lazy parsing of inputs/outpus
     pub outputs: ObjectList<'b, TransferableOutput<'b, O>>,
@@ -46,12 +67,29 @@ where
     // it generic over any input-type, in the maintenance cycle
     pub inputs: ObjectList<'b, TransferableInput<'b>>,
     pub memo: &'b [u8],
+    // network id from the transaction header, to tell which outputs are AVAX
+    network_id: u32,
 }
 
 impl<'b, O> BaseTxFields<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
+    /// The AVAX asset id on this transaction's network, if it is known.
+    pub fn avax_asset_id(&self) -> Option<&'static [u8; 32]> {
+        NetworkId::try_from(self.network_id).ok()?.avax_asset_id()
+    }
+
+    /// (visible, total) base outputs, see output_visibility
+    pub fn output_visibility(&self) -> (usize, usize) {
+        output_visibility(&self.outputs, self.renderable_out)
+    }
+
+    /// Undo the change filter on the base outputs
+    pub fn show_all_outputs(&mut self) {
+        self.renderable_out = OutputIdx::MAX;
+    }
+
     pub fn disable_output_if(&mut self, address: &[u8]) {
         // skip filtering out outputs if there is only one
         let num_outs = self.outputs.iter().count();
@@ -67,38 +105,32 @@ where
     pub fn force_disable_output(&mut self, address: &[u8]) {
         let mut idx = 0;
         let mut render = self.renderable_out;
+        let avax = self.avax_asset_id();
 
         // outputs is define as an Object List of TransferableOutputs,
         // when parsing transactions we ensure that it is not longer than
         // 64, as we use that value as a limit for the bitwise operation,
-        // this ensures that render ^= 1 << idx never overflows.
+        // this ensures that 1 << idx never overflows.
         self.outputs.iterate_with(|o| {
-            // The 99.99% of the outputs contain only one address(best case),
-            // In the worse case we just show every output.
-            if o.num_addresses() == 1 && o.contain_address(address) {
-                render ^= 1 << idx;
+            if o.is_hideable_change(address, avax) {
+                // clear the bit: toggling it would show the output
+                // again when a second change path matched it too
+                render &= !(1 << idx);
             }
             idx += 1;
         });
         self.renderable_out = render;
     }
 
+    /// Sum of the AVAX inputs (of every input on a network whose AVAX asset
+    /// is not known). The fee is paid in AVAX, so other assets never count.
     pub fn sum_inputs_amount(&self) -> Result<u64, ParserError> {
-        self.inputs
-            .iter()
-            .map(|input| input.amount().ok_or(ParserError::UnexpectedError))
-            .try_fold(0u64, |acc, x| {
-                acc.checked_add(x?).ok_or(ParserError::OperationOverflows)
-            })
+        sum_input_amounts_in(&self.inputs, self.avax_asset_id())
     }
 
+    /// Sum of the AVAX outputs, see sum_inputs_amount.
     pub fn sum_outputs_amount(&'b self) -> Result<u64, ParserError> {
-        self.outputs
-            .iter()
-            .map(|output| (*output).amount().ok_or(ParserError::UnexpectedError))
-            .try_fold(0u64, |acc, x| {
-                acc.checked_add(x?).ok_or(ParserError::OperationOverflows)
-            })
+        sum_amounts_in(&self.outputs, self.avax_asset_id())
     }
 
     pub fn outputs(&'b self) -> &'b ObjectList<'b, TransferableOutput<'b, O>> {
@@ -120,7 +152,7 @@ where
         // outputs is defined as an Object List of TransferableOutputs,
         // when parsing transactions we ensure that it is not longer than
         // 64, as we use that value as a limit for the bitwise operation,
-        // this ensures that render ^= 1 << idx never overflows.
+        // this ensures that 1 << idx never overflows.
         self.outputs.iterate_with(|o| {
             let render = self.renderable_out & (1 << idx);
             if render > 0 {
@@ -189,12 +221,18 @@ where
     }
 }
 
-impl<'b, O> FromBytes<'b> for BaseTxFields<'b, O>
+impl<'b, O> BaseTxFields<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
+    /// Parse the base fields that follow `header` in a transaction.
+    ///
+    /// The header is needed to know the network, and so which asset is
+    /// AVAX: only AVAX outputs may be hidden as change. There is deliberately
+    /// no FromBytes impl, so no transaction can parse these fields without it.
     #[inline(never)]
-    fn from_bytes_into(
+    pub fn from_bytes_after(
+        header: &Header<'_>,
         input: &'b [u8],
         out: &mut MaybeUninit<Self>,
     ) -> Result<&'b [u8], nom::Err<ParserError>> {
@@ -228,6 +266,7 @@ where
         //good ptr and no uninit reads
         unsafe {
             addr_of_mut!((*out).memo).write(memo);
+            addr_of_mut!((*out).network_id).write(header.network_id);
             // by default all outputs are renderable
             addr_of_mut!((*out).renderable_out).write(OutputIdx::MAX);
         }
@@ -238,7 +277,7 @@ where
 
 impl<'b, O> BaseTxFields<'b, O>
 where
-    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + 'b,
+    O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
 {
     /// Render one item of one base output, encoding addresses with `hrp`.
     ///
@@ -260,35 +299,270 @@ where
             .base_output_with_item(item_n)
             .map_err(|_| ViewError::NoData)?;
 
-        let inner: &Output<'_> = &obj.output;
-
         // Only secp_transfer outputs are supported, as in import/export.
-        let _ = inner.secp_transfer().ok_or(ViewError::NoData)?;
+        let _ = obj.output().secp_transfer().ok_or(ViewError::NoData)?;
 
-        // Items of the inner output alone. A locked PvmOutput counts one more
-        // (the locked-funds line), which its own render_item draws below.
-        let num_inner_items = inner.num_items()?;
+        obj.render_item_with_hrp(hrp, self.avax_asset_id(), obj_item_n, title, message, page)
+    }
+}
 
-        match obj_item_n {
-            0 => obj.render_item(obj_item_n, title, message, page),
-            x @ 1.. if x < num_inner_items => {
-                let address_idx = x - 1;
-                let address = inner
-                    .get_address(address_idx as usize)
-                    .ok_or(ViewError::NoData)?;
+#[cfg(test)]
+mod tests {
+    use crate::parser::tx_builder::*;
+    use crate::parser::{ParserError, Transaction};
+    use std::prelude::v1::*;
 
-                let t = pic_str!(b"Address");
-                title[..t.len()].copy_from_slice(t);
+    // 2100-01-01 00:00:00 UTC
+    const YEAR_2100: u64 = 4_102_444_800;
 
-                let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
-                let addr_len = address
-                    .encode_into(hrp, &mut encoded[..])
-                    .map_err(|_| ViewError::Unknown)?;
+    fn ins() -> Vec<Vec<u8>> {
+        vec![input(1, &FUJI_AVAX, 100_000_000_000)]
+    }
 
-                crate::handlers::handle_ui_message(&encoded[..addr_len], message, page)
-            }
-            x if x == num_inner_items => obj.render_item(obj_item_n, title, message, page),
-            _ => Err(ViewError::NoData),
+    #[test]
+    fn plain_change_is_hidden() {
+        let tx = x_transfer(
+            &[out(10_000_000_000, RECIPIENT), out(89_999_000_000, CHANGE)],
+            &ins(),
+        );
+        let shown = screens(&tx, Some(CHANGE));
+        assert!(!shown.iter().any(|s| s.contains("89.999")), "{:#?}", shown);
+    }
+
+    #[test]
+    fn change_filter_never_hides_every_output() {
+        // Everything going to the user's own change paths used to leave a
+        // review with no output at all.
+        const CHANGE_2: [u8; 20] = [0x08; 20];
+        let tx = x_transfer(
+            &[out(10_000_000_000, CHANGE), out(89_999_000_000, CHANGE_2)],
+            &ins(),
+        );
+        let shown = screens_with_change(&tx, &[CHANGE, CHANGE_2]);
+        assert!(shown.contains(&"Transfer: 10 AVAX to ".to_string()), "{:#?}", shown);
+        assert!(shown.contains(&"Transfer: 89.999 AVAX to ".to_string()), "{:#?}", shown);
+
+        // one of them alone is still hidden
+        let shown = screens_with_change(&tx, &[CHANGE]);
+        assert!(!shown.contains(&"Transfer: 10 AVAX to ".to_string()), "{:#?}", shown);
+    }
+
+    #[test]
+    fn repeated_change_path_keeps_the_output_hidden() {
+        // The filter toggled the output's bit, so a change path sent twice
+        // made the change visible again, and one sent three times hid it.
+        let tx = x_transfer(
+            &[out(10_000_000_000, RECIPIENT), out(89_999_000_000, CHANGE)],
+            &ins(),
+        );
+        for times in 1..=3 {
+            let change = std::vec![CHANGE; times];
+            let shown = screens_with_change(&tx, &change);
+            assert!(!shown.iter().any(|s| s.contains("89.999")), "{} times: {:#?}", times, shown);
         }
+    }
+
+    #[test]
+    fn time_locked_change_is_shown() {
+        // Honest transfer vs one whose change is locked until 2100: the change
+        // used to be hidden either way, so both reviews were identical.
+        let honest = x_transfer(
+            &[out(10_000_000_000, RECIPIENT), out(89_999_000_000, CHANGE)],
+            &ins(),
+        );
+        let locked = x_transfer(
+            &[
+                out(10_000_000_000, RECIPIENT),
+                transferable(&FUJI_AVAX, secp_out(89_999_000_000, YEAR_2100, 1, &[CHANGE])),
+            ],
+            &ins(),
+        );
+        let honest = screens(&honest, Some(CHANGE));
+        let locked = screens(&locked, Some(CHANGE));
+        assert_ne!(honest, locked);
+        assert!(locked.contains(&"Transfer: 89.999 AVAX to ".to_string()), "{:#?}", locked);
+        assert!(locked.contains(&"Locked until: 2100-01-01 00:00:00 UTC".to_string()));
+    }
+
+    #[test]
+    fn stakeable_locked_change_is_shown() {
+        let locked = p_base(
+            &[
+                out(10_000_000_000, RECIPIENT),
+                transferable(
+                    &FUJI_AVAX,
+                    stakeable_locked(YEAR_2100, secp_out(89_999_000_000, 0, 1, &[CHANGE])),
+                ),
+            ],
+            &ins(),
+        );
+        let shown = screens(&locked, Some(CHANGE));
+        assert!(
+            shown.contains(&"Funds locked: 89.999 AVAX until 2100-01-01 00:00:00 UTC".to_string()),
+            "{:#?}",
+            shown
+        );
+    }
+
+    #[test]
+    fn change_in_another_asset_is_shown() {
+        let tx = x_transfer(
+            &[
+                out(10_000_000_000, RECIPIENT),
+                transferable(&OTHER_ASSET, secp_out(5, 0, 1, &[CHANGE])),
+                out(89_999_000_000, CHANGE),
+            ],
+            &[input(1, &FUJI_AVAX, 100_000_000_000), input(2, &OTHER_ASSET, 5)],
+        );
+        let shown = screens(&tx, Some(CHANGE));
+        // the AVAX change is hidden, the other asset's is not
+        assert!(!shown.iter().any(|s| s.contains("89.999")), "{:#?}", shown);
+        assert!(shown.iter().any(|s| s.starts_with("Transfer: 5 units of asset")), "{:#?}", shown);
+    }
+
+    // CB58 of OTHER_ASSET
+    const OTHER_ASSET_CB58: &str = "hgEUNSv636ed3cEHTBSscHtTj11sDdX7YxhpG5RtvbGqmUKmP";
+
+    #[test]
+    fn asset_of_every_output_is_shown() {
+        // The recipient's output switched to another asset used to review
+        // exactly like the honest AVAX transfer: every amount said "AVAX".
+        let honest = x_transfer(
+            &[out(10_000_000_000, RECIPIENT), out(89_999_000_000, CHANGE)],
+            &ins(),
+        );
+        let swapped = x_transfer(
+            &[
+                transferable(&OTHER_ASSET, secp_out(10_000_000_000, 0, 1, &[RECIPIENT])),
+                out(89_999_000_000, CHANGE),
+            ],
+            &[input(1, &FUJI_AVAX, 90_000_000_000), input(2, &OTHER_ASSET, 10_000_000_000)],
+        );
+        let honest = screens(&honest, Some(CHANGE));
+        let swapped = screens(&swapped, Some(CHANGE));
+
+        assert!(honest.contains(&"Transfer: 10 AVAX to ".to_string()), "{:#?}", honest);
+        assert_ne!(honest, swapped);
+        // raw units, as the asset's denomination is not known, and its id
+        let expected = format!("Transfer: 10000000000 units of asset {} to ", OTHER_ASSET_CB58);
+        assert!(swapped.contains(&expected), "{:#?}", swapped);
+        assert!(!swapped.iter().any(|s| s.contains("10 AVAX")), "{:#?}", swapped);
+    }
+
+    #[test]
+    fn fee_only_counts_avax() {
+        // 90 AVAX + 5 units of another asset in; 10 + 79.999 AVAX and the 5
+        // units out: the fee is 0.001 AVAX, whatever the other asset does.
+        let tx = x_transfer(
+            &[
+                out(10_000_000_000, RECIPIENT),
+                out(79_999_000_000, CHANGE),
+                transferable(&OTHER_ASSET, secp_out(5, 0, 1, &[RECIPIENT])),
+            ],
+            &[input(1, &FUJI_AVAX, 90_000_000_000), input(2, &OTHER_ASSET, 5)],
+        );
+        let shown = screens(&tx, Some(CHANGE));
+        assert_eq!(shown.last().unwrap(), "Fee(AVAX): 0.001", "{:#?}", shown);
+    }
+
+    #[test]
+    fn burning_another_asset_is_rejected() {
+        use crate::parser::{ParserError, Transaction};
+
+        // Inputs are not shown and the fee only counts AVAX, so 1e12 units
+        // of another asset spent into a transaction with AVAX outputs only
+        // reviewed like a plain AVAX transfer, and avalanchego burns them.
+        let burn = x_transfer(
+            &[out(10_000_000_000, RECIPIENT), out(89_999_000_000, CHANGE)],
+            &[
+                input(1, &FUJI_AVAX, 100_000_000_000),
+                input(2, &OTHER_ASSET, 1_000_000_000_000),
+            ],
+        );
+        assert_eq!(Transaction::new(&burn).unwrap_err(), ParserError::UnexpectedType);
+
+        // producing less of it than consumed is the same burn
+        let partial = x_transfer(
+            &[
+                out(10_000_000_000, RECIPIENT),
+                transferable(&OTHER_ASSET, secp_out(1, 0, 1, &[RECIPIENT])),
+            ],
+            &[input(1, &FUJI_AVAX, 100_000_000_000), input(2, &OTHER_ASSET, 2)],
+        );
+        assert_eq!(Transaction::new(&partial).unwrap_err(), ParserError::UnexpectedType);
+
+        // and producing more than consumed is not a valid transaction
+        let mint = x_transfer(
+            &[transferable(&OTHER_ASSET, secp_out(3, 0, 1, &[RECIPIENT]))],
+            &[input(1, &FUJI_AVAX, 100_000_000_000), input(2, &OTHER_ASSET, 2)],
+        );
+        assert_eq!(Transaction::new(&mint).unwrap_err(), ParserError::UnexpectedType);
+
+        // On a custom network the AVAX asset is not known, so nothing is
+        // checked there.
+        let mut custom = burn.clone();
+        custom[6..10].copy_from_slice(&1337u32.to_be_bytes());
+        assert!(Transaction::new(&custom).is_ok());
+    }
+
+    #[test]
+    fn nothing_is_avax_where_the_network_is_unknown() {
+        // On a custom network the AVAX asset id is not known: nothing is
+        // labelled AVAX, and nothing is hidden as change.
+        let mut tx = x_transfer(
+            &[out(10_000_000_000, RECIPIENT), out(89_999_000_000, CHANGE)],
+            &ins(),
+        );
+        tx[6..10].copy_from_slice(&1337u32.to_be_bytes());
+        let shown = screens(&tx, Some(CHANGE));
+        assert!(!shown.iter().any(|s| s.contains(" AVAX to")), "{:#?}", shown);
+        assert!(shown.iter().any(|s| s.starts_with("Transfer: 89999000000 units")), "{:#?}", shown);
+    }
+
+    #[test]
+    fn locktime_is_shown_on_every_output() {
+        let tx = x_transfer(
+            &[transferable(&FUJI_AVAX, secp_out(10_000_000_000, YEAR_2100, 1, &[RECIPIENT]))],
+            &ins(),
+        );
+        assert!(screens(&tx, None).contains(&"Locked until: 2100-01-01 00:00:00 UTC".to_string()));
+    }
+
+    #[test]
+    fn hex_memo_cannot_pass_for_text() {
+        let with_memo = |memo: &[u8]| {
+            let mut tx = x_transfer(&[out(10_000_000_000, RECIPIENT)], &ins());
+            let len = tx.len();
+            tx[len - 4..].copy_from_slice(&(memo.len() as u32).to_be_bytes());
+            tx.extend(memo);
+            screens(&tx, None).last().unwrap().clone()
+        };
+
+        // The text "00010203" and the bytes 00 01 02 03 used to look the same
+        assert_eq!(with_memo(b"00010203"), "Memo: 00010203");
+        assert_eq!(with_memo(&[0, 1, 2, 3]), "Memo: 0x00010203");
+        // and text that looks like hex is shown as hex
+        assert_eq!(with_memo(b"0x0102"), "Memo: 0x307830313032");
+    }
+
+    #[test]
+    fn exported_outputs_are_labelled_as_leaving_the_chain() {
+        use crate::parser::tx_builder::testvectors_path;
+
+        // exported and local outputs were both titled "Amount"
+        let file = std::fs::File::open(testvectors_path("p_export_to_x.json")).unwrap();
+        let data: Vec<u8> = serde_json::from_reader(file).unwrap();
+        let shown = screens(&data, None);
+        assert!(shown.iter().any(|s| s.starts_with("Export to X: ")), "{:#?}", shown);
+        assert!(shown.iter().any(|s| s.starts_with("Amount: ")), "{:#?}", shown);
+    }
+
+    #[test]
+    fn locktime_past_date_table_is_rejected() {
+        let tx = x_transfer(
+            &[transferable(&FUJI_AVAX, secp_out(10_000_000_000, u64::MAX, 1, &[RECIPIENT]))],
+            &ins(),
+        );
+        assert_eq!(Transaction::new(&tx).unwrap_err(), ParserError::InvalidTimestamp);
     }
 }

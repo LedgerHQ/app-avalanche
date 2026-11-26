@@ -1,13 +1,14 @@
 ---
-source: app/src/parser/transactions.rs
+source: src/parser/transactions.rs
 expression: reduced
-input_file: app/src/parser/testvectors/x_import_from_p.json
+input_file: src/parser/testvectors/x_import_from_p.json
 ---
 [
     "ImportTx": "Sending",
     "Amount": "0.000012345 AVAX to ",
     "Address": "fuji1cv6yz28qvqfgah34yw3y53su39p6kzzehw5pj3",
+    "Locked until": "1970-01-01 15:05:21 UTC",
     "From ": "P Chain",
     "Fee(AVAX)": "0.246901233",
-    "Memo": "00010203",
+    "Memo": "0x00010203",
 ]

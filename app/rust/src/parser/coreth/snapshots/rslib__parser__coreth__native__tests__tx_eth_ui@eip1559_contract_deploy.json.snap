@@ -1,11 +1,13 @@
 ---
-source: app/src/parser/coreth/native.rs
+source: src/parser/coreth/native.rs
 expression: reduced
-input_file: app/src/parser/coreth/eth_testvectors/eip1559_contract_deploy.json
+input_file: src/parser/coreth/eth_testvectors/eip1559_contract_deploy.json
 ---
 [
+    "Chain ID": "43114",
     "Contract": "Creation",
     "Gas Limit": "1500000",
-    "Data: ": "0x608060405234801561001057600080fd5b50610150806100206000396000...",
-    "Maximum Fee(GWEI)": "90000000",
+    "Data Length": "81 bytes",
+    "Data Hash": "0x3d47ffb71220cd30d42a4ad1c5bee7a5bc1d86c7d89e19ad2be485e141c67b56",
+    "Maximum Fee(GWEI)": "47250000",
 ]

@@ -83,6 +83,8 @@ zxerr_t _set_tx_hash(uint8_t *hash, uint16_t hash_len_bytes);
 zxerr_t _tx_data_offset(const uint8_t *buffer, uint16_t buffer_len, uint16_t *offset);
 
 zxerr_t _get_hash(uint8_t *hash, uint16_t hash_len);
+// marks the hash stored by _parse_sign_hash_tx as approved by the user
+zxerr_t _approve_sign_hash();
 // gets the path(root_path + suffix_path?) to sign a hash
 zxerr_t _get_signing_info(uint32_t *path, uint16_t path_len, uint8_t *input, uint16_t input_len);
 

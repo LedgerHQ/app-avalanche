@@ -26,9 +26,9 @@ use crate::{
     handlers::handle_ui_message,
     parser::{
         intstr_to_fpstr_inplace, nano_avax_to_fp_str, proof_of_possession::BLSSigner, u64_to_str,
-        BaseTxFields, DisplayableItem, FromBytes, Header, NodeId, ObjectList, OutputIdx,
+        sum_amounts_in, BaseTxFields, DisplayableItem, FromBytes, Header, NodeId, ObjectList, OutputIdx,
         ParserError, PvmOutput, SECPOutputOwners, TransferableOutput, DELEGATION_FEE_DIGITS,
-        MAX_ADDRESS_ENCODED_LEN, NODE_ID_LEN, PVM_ADD_AUTO_RENEWED_VALIDATOR, U64_FORMATTED_SIZE,
+        NODE_ID_LEN, PVM_ADD_AUTO_RENEWED_VALIDATOR, U64_FORMATTED_SIZE,
     },
 };
 
@@ -74,7 +74,11 @@ impl<'b> FromBytes<'b> for AddAutoRenewedValidatorTx<'b> {
 
         // base_tx
         let base_tx = unsafe { &mut *addr_of_mut!((*out).base_tx).cast() };
-        let rem = BaseTxFields::<PvmOutput>::from_bytes_into(rem, base_tx)?;
+        let rem = BaseTxFields::<PvmOutput>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_tx,
+        )?;
         crate::sys::zemu_log_stack("AutoRenewed::base_tx ok\x00");
 
         // node_id: avalanchego types it as a JSONByteSlice ([]byte), so the codec
@@ -147,17 +151,17 @@ impl DisplayableItem for AddAutoRenewedValidatorTx<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
         let base = self.base_tx.base_outputs_num_items()?;
         let signer = self.signer.num_items()?;
-        let validator_rewards = self.validator_rewards_owner.num_addresses() as u8;
-        let delegator_rewards = self.delegator_rewards_owner.num_addresses() as u8;
-        let owner_addresses = self.owner.num_addresses() as u8;
+        let validator_rewards = self.validator_rewards_owner.num_items()?;
+        let delegator_rewards = self.delegator_rewards_owner.num_items()?;
+        let owner_addresses = self.owner.num_items()?;
         let stake = self.num_stake_items()?;
 
-        // 1(header) + base + 1(node_id) + signer + stake
+        // 1(header) + base + 1(node_id) + signer + 1(total stake) + stake
         // + validator_rewards + delegator_rewards + owner_addresses
         // + 1(delegation_fee) + 1(auto_compound) + 1(period) + 1(fee)
         checked_add!(
             ViewError::Unknown,
-            6u8,
+            7u8,
             base,
             signer,
             stake,
@@ -178,7 +182,11 @@ impl DisplayableItem for AddAutoRenewedValidatorTx<'_> {
         let base_outputs_items = self.base_tx.base_outputs_num_items()?;
         let stake_outputs_items = self.num_stake_items()?;
 
-        let total_items = self.num_items()?;
+        // what render_last_items shows: the owner addresses and the four
+        // trailing fields, i.e. everything after the stake outputs (header,
+        // node id and total stake are the 3 single screens before them)
+        let last_items =
+            self.num_items()? - (3 + base_outputs_items + signer_items + stake_outputs_items);
 
         match_ranges! {
             match item_n alias x {
@@ -191,8 +199,9 @@ impl DisplayableItem for AddAutoRenewedValidatorTx<'_> {
                 until base_outputs_items => self.render_base_outputs(x, title, message, page),
                 until 1 => self.node_id.render_item(0, title, message, page),
                 until signer_items => self.signer.render_item(x, title, message, page),
+                until 1 => self.render_total_stake(title, message, page),
                 until stake_outputs_items => self.render_stake_outputs(x, title, message, page),
-                until total_items => self.render_last_items(x, title, message, page),
+                until last_items => self.render_last_items(x, title, message, page),
                 _ => Err(ViewError::NoData),
             }
         }
@@ -209,10 +218,13 @@ impl<'b> AddAutoRenewedValidatorTx<'b> {
 
         let mut idx = 0;
         let mut render = self.renderable_out;
+        let avax = self.tx_header.avax_asset_id();
 
         self.stake.iterate_with(|o| {
-            if o.num_addresses() == 1 && o.contain_address(address) {
-                render ^= 1 << idx;
+            if o.is_hideable_change(address, avax) {
+                // clear the bit: toggling it would show the output
+                // again when a second change path matched it too
+                render &= !(1 << idx);
             }
             idx += 1;
         });
@@ -223,7 +235,8 @@ impl<'b> AddAutoRenewedValidatorTx<'b> {
         let sum_inputs = self.base_tx.sum_inputs_amount()?;
 
         let base_outputs = self.base_tx.sum_outputs_amount()?;
-        let stake_outputs = Self::sum_stake_outputs_amount(&self.stake)?;
+        // AVAX only, as the fee is paid in AVAX
+        let stake_outputs = sum_amounts_in(&self.stake, self.tx_header.avax_asset_id())?;
 
         let total_outputs = base_outputs
             .checked_add(stake_outputs)
@@ -276,6 +289,28 @@ impl<'b> AddAutoRenewedValidatorTx<'b> {
         self.render_output_with_header(&obj, item_idx, title, message, page, header)
     }
 
+    /// The AVAX being staked. The stake outputs that carry it can all be
+    /// hidden by the change filter, and the fee only shows what is left over,
+    /// so without this screen a review could show no stake amount at all.
+    /// Only AVAX is counted, as in the fee; a stake output in another asset
+    /// is never hidden as change, so it keeps its own screens and asset id.
+    fn render_total_stake(
+        &self,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
+        let label = pic_str!(b"Total stake(AVAX)");
+        title[..label.len()].copy_from_slice(label);
+
+        let stake = sum_amounts_in(&self.stake, self.tx_header.avax_asset_id())
+            .map_err(|_| ViewError::Unknown)?;
+        let mut buffer = [0; U64_FORMATTED_SIZE + 2];
+        let num = nano_avax_to_fp_str(stake, &mut buffer[..]).map_err(|_| ViewError::Unknown)?;
+
+        handle_ui_message(num, message, page)
+    }
+
     fn render_stake_outputs(
         &self,
         item_n: u8,
@@ -300,77 +335,44 @@ impl<'b> AddAutoRenewedValidatorTx<'b> {
         page: u8,
         header: &[u8],
     ) -> Result<u8, ViewError> {
-        let num_inner_items = obj.output.num_inner_items()?;
+        let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+        let avax = self.tx_header.avax_asset_id();
+        let res = obj.render_item_with_hrp(hrp, avax, item_n, title, message, page);
 
-        match item_n {
-            0 => {
-                title[..header.len()].copy_from_slice(header);
-                let res = obj.render_item(0, title, message, page);
-                title.iter_mut().for_each(|v| *v = 0);
-                title[..header.len()].copy_from_slice(header);
-                res
-            }
-            x @ 1.. if x < num_inner_items => {
-                let address_idx = x - 1;
-                let address = obj
-                    .output
-                    .get_address_at(address_idx as usize)
-                    .ok_or(ViewError::NoData)?;
-                let t = pic_str!(b"Address");
-                title[..t.len()].copy_from_slice(t);
-
-                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
-                let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
-
-                let addr_len = address
-                    .encode_into(hrp, &mut encoded[..])
-                    .map_err(|_| ViewError::Unknown)?;
-
-                handle_ui_message(&encoded[..addr_len], message, page)
-            }
-            _ => obj.render_item(item_n, title, message, page),
+        // 'Transfer' or 'Stake' instead of 'Amount'
+        if item_n == 0 {
+            title.iter_mut().for_each(|v| *v = 0);
+            title[..header.len()].copy_from_slice(header);
         }
-    }
 
-    fn sum_stake_outputs_amount(
-        stake: &'b ObjectList<'b, TransferableOutput<PvmOutput<'b>>>,
-    ) -> Result<u64, ParserError> {
-        stake
-            .iter()
-            .filter_map(|output| output.amount())
-            .try_fold(0u64, |acc, x| acc.checked_add(x))
-            .ok_or(ParserError::OperationOverflows)
+        res
     }
 
     fn render_rewards_to(
         &self,
-        addr_idx: usize,
+        item_n: u8,
         title: &mut [u8],
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, zemu_sys::ViewError> {
         let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
-        let validators = self.validator_rewards_owner.num_addresses();
-        let delegators = self.delegator_rewards_owner.num_addresses();
-        let owners = self.owner.num_addresses();
+        let validators = self.validator_rewards_owner.num_items()?;
+        let delegators = self.delegator_rewards_owner.num_items()?;
+        let owners = self.owner.num_items()?;
 
         match_ranges! {
-            match addr_idx alias x {
+            match item_n alias x {
                 until validators => {
                     let label = pic_str!(b"Valida rewards to");
-                    title[..label.len()].copy_from_slice(label);
-                    self.validator_rewards_owner.render_address_with_hrp(hrp, x, message, page)
+                    self.validator_rewards_owner
+                        .render_item_with_label(hrp, label, x, title, message, page)
                 }
                 until delegators => {
                     let label = pic_str!(b"Delega rewards to");
-                    title[..label.len()].copy_from_slice(label);
-                    self.delegator_rewards_owner.render_address_with_hrp(hrp, x, message, page)
+                    self.delegator_rewards_owner
+                        .render_item_with_label(hrp, label, x, title, message, page)
                 }
-                until owners => {
-                    let label = pic_str!(b"Owner address");
-                    title[..label.len()].copy_from_slice(label);
-                    self.owner.render_address_with_hrp(hrp, x, message, page)
-                }
+                until owners => self.owner.render_item_with_hrp(hrp, x, title, message, page),
                 _ => Err(ViewError::NoData)
             }
         }
@@ -384,14 +386,17 @@ impl<'b> AddAutoRenewedValidatorTx<'b> {
         page: u8,
     ) -> Result<u8, zemu_sys::ViewError> {
         let mut buffer = [0; U64_FORMATTED_SIZE + 2];
-        let num_addresses = (self.validator_rewards_owner.num_addresses()
-            + self.delegator_rewards_owner.num_addresses()
-            + self.owner.num_addresses()) as u8;
+        let owner_items = checked_add!(
+            ViewError::Unknown,
+            self.validator_rewards_owner.num_items()?,
+            self.delegator_rewards_owner.num_items()?,
+            self.owner.num_items()?
+        )?;
 
         match_ranges! {
             match item_n alias x {
-                until num_addresses => {
-                    self.render_rewards_to(x as usize, title, message, page)
+                until owner_items => {
+                    self.render_rewards_to(x, title, message, page)
                 }
                 until 1 => {
                     let label = pic_str!(b"Delegate fee(%)");
@@ -490,6 +495,89 @@ mod tests {
         assert_eq!(tx.owner.num_addresses(), 1);
         assert_eq!(tx.validator_rewards_owner.num_addresses(), 1);
         assert_eq!(tx.delegator_rewards_owner.num_addresses(), 1);
+    }
+
+    /// The stake outputs can all be hidden by the change filter, and the fee
+    /// is only what is left over, so the amount being staked needs a screen
+    /// of its own that no filter touches.
+    #[test]
+    fn auto_renewed_validator_always_shows_total_stake() {
+        // The vector stakes a placeholder asset; stake AVAX instead, so the
+        // change filter can hide the stake outputs.
+        let (_, tx) =
+            AddAutoRenewedValidatorTx::from_bytes(SIMPLE_ADD_AUTO_RENEWED_VALIDATOR).unwrap();
+        let placeholder = *tx.stake.iter().next().unwrap().asset_id().id();
+        let avax = *tx.tx_header.avax_asset_id().unwrap();
+        assert_ne!(placeholder, avax);
+        let mut data = Vec::from(SIMPLE_ADD_AUTO_RENEWED_VALIDATOR);
+        let mut at = 0;
+        while let Some(i) = data[at..].windows(32).position(|w| w == &placeholder[..]) {
+            data[at + i..at + i + 32].copy_from_slice(&avax);
+            at += i + 32;
+        }
+
+        let (_, mut tx) = AddAutoRenewedValidatorTx::from_bytes(&data).unwrap();
+        let total = sum_amounts_in(&tx.stake, tx.tx_header.avax_asset_id()).unwrap();
+        assert!(total > 0);
+
+        let mut expected = [0; U64_FORMATTED_SIZE + 2];
+        let expected = nano_avax_to_fp_str(total, &mut expected[..])
+            .unwrap()
+            .to_vec();
+
+        // Hide every stake output, as a change filter matching their address
+        // does.
+        let stake_addresses = tx
+            .stake
+            .iter()
+            .map(|o| *o.output().get_address(0).unwrap().raw_address())
+            .collect::<Vec<_>>();
+        for address in &stake_addresses {
+            tx.disable_output_if(address);
+        }
+        assert_eq!(tx.num_stake_items().unwrap(), 0);
+
+        let items = tx.num_items().unwrap();
+        let found = (0..items).any(|i| {
+            let mut page = Page::<18, 1024>::default();
+            tx.render_item(i, &mut page.title, &mut page.message, 0)
+                .unwrap();
+            let reduced = ReducedPage::from(&page);
+            format!("{:?}", reduced)
+                == format!(
+                    "{:?}: {:?}",
+                    "Total stake(AVAX)",
+                    core::str::from_utf8(&expected).unwrap()
+                )
+        });
+        assert!(
+            found,
+            "no Total stake screen once the stake outputs are hidden"
+        );
+    }
+
+    /// Stake in another asset is not counted as AVAX, and is never hidden as
+    /// change, so it stays on screen with its asset id.
+    #[test]
+    fn auto_renewed_validator_non_avax_stake_stays_visible() {
+        let (_, mut tx) =
+            AddAutoRenewedValidatorTx::from_bytes(SIMPLE_ADD_AUTO_RENEWED_VALIDATOR).unwrap();
+        assert_eq!(
+            sum_amounts_in(&tx.stake, tx.tx_header.avax_asset_id()).unwrap(),
+            0
+        );
+        let stake_items = tx.num_stake_items().unwrap();
+        assert!(stake_items > 0);
+
+        let stake_addresses = tx
+            .stake
+            .iter()
+            .map(|o| *o.output().get_address(0).unwrap().raw_address())
+            .collect::<Vec<_>>();
+        for address in &stake_addresses {
+            tx.disable_output_if(address);
+        }
+        assert_eq!(tx.num_stake_items().unwrap(), stake_items);
     }
 
     #[test]

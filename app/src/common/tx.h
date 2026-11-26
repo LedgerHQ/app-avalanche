@@ -64,14 +64,14 @@ const char *tx_avax_parse_msg();
 zxerr_t tx_getNumItems(uint8_t *num_items);
 
 /// Gets an specific item from the transaction (including paging)
-zxerr_t tx_getItem(int8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outValue, uint16_t outValueLen,
+zxerr_t tx_getItem(uint8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outValue, uint16_t outValueLen,
                    uint8_t pageIdx, uint8_t *pageCount);
 
 /// Return the number of items for blind signing (ETH streaming mode)
 zxerr_t tx_getNumItemsBlindSign(uint8_t *num_items);
 
 /// Gets an specific item for blind signing display (ETH streaming mode)
-zxerr_t tx_getItemBlindSign(int8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outValue, uint16_t outValueLen,
+zxerr_t tx_getItemBlindSign(uint8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outValue, uint16_t outValueLen,
                             uint8_t pageIdx, uint8_t *pageCount);
 
 // Returns the error message corresponding with error

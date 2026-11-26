@@ -35,6 +35,25 @@ pub const AVAX_C_CHAIN_MAINNET_ID: u64 = 43114;
 pub const AVAX_C_CHAIN_FUJI_ID: u64 = 43113;
 pub const AVAX_C_CHAIN_LOCAL_ID: u64 = 43112;
 
+// AVAX asset id of each network whose genesis we know, as checked by
+// avalanchego's genesis TestAVAXAssetID. Custom and devnet genesis are not
+// fixed, so no asset is AVAX there.
+// FvwEAhmxKfeiG8SnEvq42hc6whRyY3EFYAvebMqDNDGCgxN5Z
+pub const AVAX_ASSET_ID_MAINNET: [u8; 32] = [
+    0x21, 0xe6, 0x73, 0x17, 0xcb, 0xc4, 0xbe, 0x2a, 0xeb, 0x00, 0x67, 0x7a, 0xd6, 0x46, 0x27, 0x78,
+    0xa8, 0xf5, 0x22, 0x74, 0xb9, 0xd6, 0x05, 0xdf, 0x25, 0x91, 0xb2, 0x30, 0x27, 0xa8, 0x7d, 0xff,
+];
+// U8iRqJoiJm8xZHAacmvYyZVwqQx6uDNtQeP3CQ6fcgQk3JqnK
+pub const AVAX_ASSET_ID_FUJI: [u8; 32] = [
+    0x3d, 0x9b, 0xda, 0xc0, 0xed, 0x1d, 0x76, 0x13, 0x30, 0xcf, 0x68, 0x0e, 0xfd, 0xeb, 0x1a, 0x42,
+    0x15, 0x9e, 0xb3, 0x87, 0xd6, 0xd2, 0x95, 0x0c, 0x96, 0xf7, 0xd2, 0x8f, 0x61, 0xbb, 0xe2, 0xaa,
+];
+// 2fombhL7aGPwj3KH4bfrmJwW6PVnMobf9Y2fn9GwxiAAJyFDbe
+pub const AVAX_ASSET_ID_LOCAL: [u8; 32] = [
+    0xdb, 0xcf, 0x89, 0x0f, 0x77, 0xf4, 0x9b, 0x96, 0x85, 0x76, 0x48, 0xb7, 0x2b, 0x77, 0xf9, 0xf8,
+    0x29, 0x37, 0xf2, 0x8a, 0x68, 0x70, 0x4a, 0xf0, 0x5d, 0xa0, 0xdc, 0x12, 0xba, 0x53, 0xf2, 0xdb,
+];
+
 // hrp
 pub const HRP_MAINNET: &str = "avax";
 pub const HRP_TESTNET: &str = "fuji";
@@ -62,7 +81,8 @@ pub const PVM_SET_L1_VALIDATOR_WEIGHT: u32 = 0x00000025;
 pub const PVM_DISABLE_L1_VALIDATOR: u32 = 0x00000027;
 pub const PVM_INCREASE_L1_VALIDATOR_BALANCE: u32 = 0x00000026;
 
-// ACP-236: Auto-renewed staking (placeholder TypeID)
+// ACP-236: Auto-renewed staking. Registered in avalanchego v1.15.0
+// (RegisterHeliconTypes), so these are the final type IDs.
 pub const PVM_ADD_AUTO_RENEWED_VALIDATOR: u32 = 0x00000028;
 pub const PVM_SET_AUTO_RENEWED_VALIDATOR_CONFIG: u32 = 0x00000029;
 
@@ -83,11 +103,6 @@ pub const EVM_EXPORT_TX: u32 = 0x00000001;
 pub const EIP1559_TX: u8 = 0x02;
 pub const EIP2930_TX: u8 = 0x01;
 pub const ETH_ARG_LEN: usize = 32;
-// The number of bytes to be shown
-// when rendering the contract data
-// It is cropped as this data can be
-// very large.
-pub const DEPLOY_DATA_PREVIEW_LEN: usize = 30;
 // taken from app-ethereum where its value is 70
 // but we reduce it to 50 to save some bytes
 pub const COLLECTION_NAME_MAX_LEN: usize = 50;

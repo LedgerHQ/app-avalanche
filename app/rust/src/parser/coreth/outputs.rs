@@ -25,7 +25,7 @@ use crate::{
     handlers::handle_ui_message,
     parser::{
         error::ParserError, nano_avax_to_fp_str, Address, AssetId, DisplayableItem, FromBytes,
-        Output, OutputType, SECPTransferOutput, U64_FORMATTED_SIZE,
+        Output, OutputLock, OutputType, SECPTransferOutput, U64_FORMATTED_SIZE,
     },
 };
 
@@ -40,6 +40,8 @@ impl EOutput<'_> {
         self.0.amount()
     }
 }
+
+impl OutputLock for EOutput<'_> {}
 
 impl<'b> Deref for EOutput<'b> {
     type Target = Output<'b>;

@@ -1,6 +1,5 @@
 ---
 source: src/parser/transactions.rs
-assertion_line: 787
 expression: reduced
 input_file: src/parser/testvectors/transform_subnet.json
 ---
@@ -8,7 +7,7 @@ input_file: src/parser/testvectors/transform_subnet.json
     "TransformSubnet": "Transaction",
     "SubnetID": "SkB92YpWm4UpburLz9tEKZw2i67H3FF6YkjaU4BkFUDTG9Xm",
     "AssetId": "2Ab62uWwJw1T6VvmKD36ufsiuGZuX1pGykXAvPX1LtjTRHxwcc",
-    "Fee(AVAX)": "17293822579.102704639",
+    "Fee(AVAX)": "10",
     "Initial supply": "1152921504606846976",
     "Maximum supply": "18446744073709551615",
     "Min consumption": "1000",

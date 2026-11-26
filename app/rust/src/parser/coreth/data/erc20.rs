@@ -210,6 +210,11 @@ impl ERC20__Type {
 }
 
 impl<'b> ERC20<'b> {
+    /// Whether `contract_address` is one of the allow-listed ERC-20 tokens
+    pub fn is_known_token(contract_address: &Address) -> bool {
+        get_token_info(contract_address.raw_address()).is_some()
+    }
+
     pub fn method_name(&self) -> &'static [u8] {
         match self {
             ERC20::Transfer { .. } => pic_str!(b"transfer"!),
@@ -301,7 +306,7 @@ impl<'b> ERC20<'b> {
                 to,
                 value,
             } => (contract_address, to, value),
-            _ => unsafe { core::hint::unreachable_unchecked() },
+            _ => return Err(ViewError::Unknown),
         };
 
         match item_n {
@@ -336,7 +341,7 @@ impl<'b> ERC20<'b> {
                 to,
                 value,
             } => (contract_address, from, to, value),
-            _ => unsafe { core::hint::unreachable_unchecked() },
+            _ => return Err(ViewError::Unknown),
         };
 
         match item_n {
@@ -377,7 +382,7 @@ impl<'b> ERC20<'b> {
                 spender,
                 value,
             } => (contract_address, spender, value),
-            _ => unsafe { core::hint::unreachable_unchecked() },
+            _ => return Err(ViewError::Unknown),
         };
 
         match item_n {
@@ -557,7 +562,14 @@ fn get_token_info(contract_bytes: &[u8; ADDRESS_LEN]) -> Option<(&'static [u8], 
     }
 }
 
-const MAX_BUFFER_SIZE: usize = 64; // TODO : Review macro usage
+/// Longest symbol an allow-listed token may have (the longest today is 7)
+const MAX_SYMBOL_LEN: usize = 16;
+
+/// Room for any amount of an allow-listed token: every decimal digit of a
+/// uint256, the decimal point, a space and the symbol, plus the spare byte
+/// `apply_decimals` and `add_symbol` keep. With 64 bytes, any amount of 63
+/// digits or more (approve(MAX - 1), say) could not be rendered at all.
+const MAX_BUFFER_SIZE: usize = u256::FORMATTED_SIZE_DECIMAL + 2 + MAX_SYMBOL_LEN + 1;
 
 fn is_max_u256(value: &BorrowedU256) -> bool {
     value.len() == 32 && value.iter().all(|&b| b == 0xff)
@@ -585,6 +597,7 @@ fn format_approve_amount(
             // ("1INCH.e" / "ALPHA.e" / "SUSHI.e" / "INFRA.e"); worst-case
             // total is 17 bytes. Catch a future allowlist entry that would
             // overflow `buf` at test time rather than via the runtime panic.
+            debug_assert!(symbol.len() <= MAX_SYMBOL_LEN);
             debug_assert!(len + 1 + symbol.len() <= buf.len());
             buf[len] = b' ';
             len += 1;
@@ -609,6 +622,7 @@ pub fn format_token_amount(
 
     // Get token info directly
     if let Some((symbol, decimals)) = get_token_info(contract_bytes) {
+        debug_assert!(symbol.len() <= MAX_SYMBOL_LEN);
         return format_amount_with_token(value, symbol, decimals, message, page);
     }
 
@@ -626,9 +640,9 @@ fn format_amount_with_token(
     page: u8,
 ) -> Result<u8, ViewError> {
     // Use separate buffers to avoid borrowing conflicts
-    let mut lexical_buffer = [0u8; u256::FORMATTED_SIZE_DECIMAL]; // TODO : Review macro usage
-    let mut format_buffer = [0u8; MAX_BUFFER_SIZE]; // TODO : Review macro usage
-    let mut final_buffer = [0u8; MAX_BUFFER_SIZE]; // TODO : Review macro usage
+    let mut lexical_buffer = [0u8; u256::FORMATTED_SIZE_DECIMAL];
+    let mut format_buffer = [0u8; MAX_BUFFER_SIZE];
+    let mut final_buffer = [0u8; MAX_BUFFER_SIZE];
 
     // Convert to string
     let raw_str = value.as_u256().to_lexical(&mut lexical_buffer);
@@ -841,16 +855,10 @@ mod tests {
         let mut value_bytes = [0xffu8; 32];
         value_bytes[31] = 0xfe;
         let value = BorrowedU256::new(&value_bytes).unwrap();
-        // Use an unknown-token address (fallback lexical path), NOT USDC.e
-        // as the design suggested. This is **not** a workaround for any
-        // bug introduced by `format_approve_amount`: it sidesteps a
-        // pre-existing limitation where `format_amount_with_token` packs
-        // a 78-digit decimal plus the inserted '.' into the 64-byte
-        // `format_buffer`, returning `ViewError::Unknown`. The
-        // unknown-token path goes straight through `handle_ui_message`,
-        // which paginates. The assertion still proves what matters:
-        // `is_max_u256` returns false for MAX-1, so the "Unlimited"
-        // branch is not entered.
+        // Unknown-token address (fallback lexical path); the allow-listed
+        // path is covered by `erc20_full_width_amounts_render`. The
+        // assertion proves `is_max_u256` returns false for MAX-1, so the
+        // "Unlimited" branch is not entered.
         let address = make_address(&UNKNOWN_TOKEN_ADDR);
 
         let mut message = [0u8; MAX_BUFFER_SIZE];
@@ -861,6 +869,64 @@ mod tests {
             "MAX-1 must not render as Unlimited; got {:?}",
             rendered(&message)
         );
+    }
+
+    // V-107: an allow-listed token amount with all 78 digits of a uint256
+    // must render, with its decimals and symbol, whatever the call.
+    #[test]
+    fn erc20_full_width_amounts_render() {
+        const WAVAX_ADDR: [u8; ADDRESS_LEN] = [
+            0xB3, 0x1F, 0x66, 0xAA, 0x3C, 0x1E, 0x78, 0x53, 0x63, 0xF0, 0x87, 0x5A, 0x1B, 0x74,
+            0xE2, 0x7B, 0x85, 0xFD, 0x66, 0xC7,
+        ];
+        const ONE_INCH_E_ADDR: [u8; ADDRESS_LEN] = [
+            0xD5, 0x01, 0x28, 0x15, 0x65, 0xBF, 0x77, 0x89, 0x22, 0x45, 0x23, 0x14, 0x4F, 0xE5,
+            0xD9, 0x8E, 0x8B, 0x28, 0xF2, 0x67,
+        ];
+        const MAX: [u8; 32] = [0xff; 32];
+        let mut max_minus_one = MAX;
+        max_minus_one[31] = 0xfe;
+
+        // approve(MAX - 1), transfer(MAX), the longest symbol
+        let cases: [(&[u8; ADDRESS_LEN], &[u8; 32], bool, &str); 4] = [
+            (
+                &USDC_E_ADDR,
+                &max_minus_one,
+                true,
+                "115792089237316195423570985008687907853269984665640564039457584007913129.639934 USDC.e",
+            ),
+            (
+                &WAVAX_ADDR,
+                &max_minus_one,
+                true,
+                "115792089237316195423570985008687907853269984665640564039457.584007913129639934 WAVAX",
+            ),
+            (
+                &WAVAX_ADDR,
+                &MAX,
+                false,
+                "115792089237316195423570985008687907853269984665640564039457.584007913129639935 WAVAX",
+            ),
+            (
+                &ONE_INCH_E_ADDR,
+                &MAX,
+                false,
+                "115792089237316195423570985008687907853269984665640564039457.584007913129639935 1INCH.e",
+            ),
+        ];
+
+        for (contract, amount, approve, expected) in cases {
+            let value = BorrowedU256::new(amount).unwrap();
+            let address = make_address(contract);
+            let mut message = [0u8; 128];
+            let res = if approve {
+                format_approve_amount(&value, &address, &mut message, 0)
+            } else {
+                format_token_amount(&value, &address, &mut message, 0)
+            };
+            assert_eq!(res, Ok(1), "{expected}");
+            assert_eq!(rendered(&message), expected.as_bytes());
+        }
     }
 
     #[test]

@@ -28,7 +28,7 @@ use zemu_sys::ViewError;
 use crate::{
     checked_add,
     handlers::handle_ui_message,
-    parser::{error::ParserError, AssetId, DisplayableItem, FromBytes},
+    parser::{error::ParserError, AssetId, DisplayableItem, FromBytes, ObjectList},
     utils::hex_encode,
 };
 
@@ -49,6 +49,22 @@ pub struct TransferableInput<'b> {
     // and this type generic over the wrapper in used
     locktime: Option<u64>,
     input: Input<'b>,
+}
+
+/// Sum the amounts of the inputs in `asset`, or of all of them when `asset`
+/// is None (a network whose AVAX asset id is not known). See
+/// `sum_amounts_in` for why the fee only counts AVAX.
+pub fn sum_input_amounts_in(
+    inputs: &ObjectList<'_, TransferableInput<'_>>,
+    asset: Option<&[u8; 32]>,
+) -> Result<u64, ParserError> {
+    inputs
+        .iter()
+        .filter(|input| asset.is_none() || asset == Some(input.asset_id().id()))
+        .map(|input| input.amount().ok_or(ParserError::UnexpectedError))
+        .try_fold(0u64, |acc, x| {
+            acc.checked_add(x?).ok_or(ParserError::OperationOverflows)
+        })
 }
 
 impl<'b> TransferableInput<'b> {

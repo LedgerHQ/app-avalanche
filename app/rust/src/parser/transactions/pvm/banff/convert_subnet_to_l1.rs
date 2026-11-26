@@ -20,7 +20,6 @@ use nom::number::complete::be_u32;
 use zemu_sys::ViewError;
 
 use crate::parser::u64_to_str;
-use crate::utils::is_app_mode_expert;
 use crate::checked_add;
 use crate::parser::chain_id::ChainId;
 use crate::{
@@ -50,15 +49,23 @@ pub struct ConvertSubnetToL1Tx<'b> {
 // description, chain_id, manager address, subnet_id, fee
 pub const BASE_FIELDS_LEN: u8 = 5;
 
-/// Screens contributed by each validator: its node id always, plus the weight
-/// and balance it is being given in expert mode. A convert can carry many
-/// validators, so the detail is gated to keep an ordinary review readable.
-fn validator_items() -> u8 {
-    if is_app_mode_expert() {
-        3
-    } else {
-        1
-    }
+/// Node id, weight, balance and BLS public key: the fixed screens of each
+/// validator, ahead of its two owners.
+const VALIDATOR_FIXED_ITEMS: u8 = 4;
+
+/// Screens contributed by one validator. They used to be the node id alone
+/// outside expert mode, but the balance is AVAX the user pays into the L1 and
+/// it is left out of the fee, so hiding it hid where that AVAX went. The
+/// owners decide who gets the balance back and who may disable the validator,
+/// so they are shown too, as is the BLS public key the validator will sign
+/// warp messages with.
+fn validator_items(validator: &L1Validator) -> Result<u8, ViewError> {
+    checked_add!(
+        ViewError::Unknown,
+        VALIDATOR_FIXED_ITEMS,
+        validator.remaining_balance_owner.num_items()?,
+        validator.deactivation_owner.num_items()?
+    )
 }
 
 impl<'b> ConvertSubnetToL1Tx<'b> {
@@ -96,9 +103,85 @@ impl<'b> ConvertSubnetToL1Tx<'b> {
         Ok(fee)
     }
 
-    /// Returns the number of validators in the list.
-    fn num_validators(&self) -> usize {
-        self.validators.iter().count()
+    /// Screens contributed by all validators together.
+    fn validators_items(&self) -> Result<u8, ViewError> {
+        let mut items = 0u8;
+        for validator in self.validators.iter() {
+            items = items
+                .checked_add(validator_items(&validator)?)
+                .ok_or(ViewError::Unknown)?;
+        }
+        Ok(items)
+    }
+
+    fn render_validator(
+        &self,
+        item_n: u8,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
+        use bolos::{pic_str, PIC};
+
+        // Find the validator this item belongs to. Validators contribute a
+        // variable number of screens, as their owners can hold several
+        // addresses.
+        let mut item_n = item_n;
+        let mut found = None;
+        for validator in self.validators.iter() {
+            let n = validator_items(&validator)?;
+            if item_n < n {
+                found = Some(validator);
+                break;
+            }
+            item_n -= n;
+        }
+        // An item index past the last validator is a caller error, not a
+        // reason to abort the app.
+        let validator = found.ok_or(ViewError::NoData)?;
+
+        let mut buffer = [0; U64_FORMATTED_SIZE + 2];
+        let remaining_items = validator.remaining_balance_owner.num_items()?;
+        let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+
+        match item_n {
+            0 => validator.node_id.render_item(0, title, message, page),
+            1 => {
+                let label = pic_str!(b"Weight");
+                title[..label.len()].copy_from_slice(label);
+                let buf =
+                    u64_to_str(validator.weight, &mut buffer).map_err(|_| ViewError::Unknown)?;
+                handle_ui_message(buf, message, page)
+            }
+            2 => {
+                let label = pic_str!(b"Balance (AVAX)");
+                title[..label.len()].copy_from_slice(label);
+                let buf = nano_avax_to_fp_str(validator.balance, &mut buffer[..])
+                    .map_err(|_| ViewError::Unknown)?;
+                handle_ui_message(buf, message, page)
+            }
+            3 => validator.signer.render_signer(title, message, page),
+            x if x - VALIDATOR_FIXED_ITEMS < remaining_items => {
+                validator.remaining_balance_owner.render_item_with_label(
+                    hrp,
+                    pic_str!(b"Rem Addr"),
+                    pic_str!(b"Anyone (no owner)"),
+                    x - VALIDATOR_FIXED_ITEMS,
+                    title,
+                    message,
+                    page,
+                )
+            }
+            x => validator.deactivation_owner.render_item_with_label(
+                hrp,
+                pic_str!(b"Disabler"),
+                pic_str!(b"Anyone"),
+                x - VALIDATOR_FIXED_ITEMS - remaining_items,
+                title,
+                message,
+                page,
+            ),
+        }
     }
 }
 
@@ -120,7 +203,11 @@ impl<'b> FromBytes<'b> for ConvertSubnetToL1Tx<'b> {
 
         // base_tx
         let base_tx = unsafe { &mut *addr_of_mut!((*out).base_tx).cast() };
-        let rem = BaseTxFields::<PvmOutput>::from_bytes_into(rem, base_tx)?;
+        let rem = BaseTxFields::<PvmOutput>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_tx,
+        )?;
 
         // subnet_id
         let subnet_id = unsafe { &mut *addr_of_mut!((*out).subnet_id).cast() };
@@ -149,6 +236,7 @@ impl<'b> FromBytes<'b> for ConvertSubnetToL1Tx<'b> {
 
         unsafe {
             addr_of_mut!((*out).address).write(address);
+            addr_of_mut!((*out).address_len).write(address_len);
         }
 
         Ok(rem)
@@ -163,8 +251,7 @@ impl DisplayableItem for ConvertSubnetToL1Tx<'_> {
         checked_add!(
             ViewError::Unknown,
             BASE_FIELDS_LEN,
-            u8::try_from(self.num_validators() * validator_items() as usize)
-                .map_err(|_| ViewError::Unknown)?,
+            self.validators_items()?,
             self.base_tx.base_outputs_num_items()?
         )
     }
@@ -179,6 +266,7 @@ impl DisplayableItem for ConvertSubnetToL1Tx<'_> {
         use bolos::pic_str;
         let mut buffer = [0; U64_FORMATTED_SIZE + 2];
         let prefix = pic_str!(b"0x"!);
+        let validator_screens = self.validators_items()?;
         match item_n {
             0 => {
                 let label = pic_str!(b"ConvertSubnetToL1");
@@ -215,45 +303,10 @@ impl DisplayableItem for ConvertSubnetToL1Tx<'_> {
 
                 handle_ui_message(fee_buff, message, page)
             }
-            x @ 5.. if (x as usize)
-                < BASE_FIELDS_LEN as usize
-                    + self.num_validators() * validator_items() as usize =>
-            {
-                let offset = x - BASE_FIELDS_LEN;
-                let per = validator_items();
-                let validator_n = offset / per;
-                // An item index past the last validator is a caller error, not
-                // a reason to abort the app: the arm is open-ended, so nothing
-                // bounds x against num_items. unwrap() here turned an
-                // out-of-range review index into a panic, which on this target
-                // is an immediate abort.
-                let validator = self
-                    .validators
-                    .get(validator_n.into())
-                    .ok_or(ViewError::NoData)?;
-
-                match offset % per {
-                    0 => validator.node_id.render_item(0, title, message, page),
-                    1 => {
-                        let label = pic_str!(b"Weight");
-                        title[..label.len()].copy_from_slice(label);
-                        let buf = u64_to_str(validator.weight, &mut buffer)
-                            .map_err(|_| ViewError::Unknown)?;
-                        handle_ui_message(buf, message, page)
-                    }
-                    _ => {
-                        let label = pic_str!(b"Balance (AVAX)");
-                        title[..label.len()].copy_from_slice(label);
-                        let buf = nano_avax_to_fp_str(validator.balance, &mut buffer[..])
-                            .map_err(|_| ViewError::Unknown)?;
-                        handle_ui_message(buf, message, page)
-                    }
-                }
+            x @ BASE_FIELDS_LEN.. if x - BASE_FIELDS_LEN < validator_screens => {
+                self.render_validator(x - BASE_FIELDS_LEN, title, message, page)
             }
-            x @ 5.. => {
-                let validator_screens =
-                    u8::try_from(self.num_validators() * validator_items() as usize)
-                        .map_err(|_| ViewError::Unknown)?;
+            x @ BASE_FIELDS_LEN.. => {
                 let output_n = x - BASE_FIELDS_LEN - validator_screens;
                 let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
                 self.base_tx
@@ -330,6 +383,227 @@ mod tests {
         }
     }
 
+    /// Every (title, message) pair the review shows, first page only.
+    fn screens(tx: &ConvertSubnetToL1Tx) -> Vec<(String, String)> {
+        let items = tx.num_items().expect("Overflow?");
+        (0..items)
+            .map(|i| {
+                let mut page = Page::<18, 1024>::default();
+                tx.render_item(i, &mut page.title, &mut page.message, 0)
+                    .unwrap_or_else(|e| panic!("item {} failed: {:?}", i, e));
+                let reduced = ReducedPage::from(&page);
+                let text = format!("{:?}", reduced);
+                let (title, message) = text.split_once(": ").unwrap();
+                (
+                    title.trim_matches('"').into(),
+                    message.trim_matches('"').into(),
+                )
+            })
+            .collect()
+    }
+
+    fn bech32(hrp: &str, raw: &[u8; crate::parser::ADDRESS_LEN]) -> String {
+        use crate::parser::{Address, MAX_ADDRESS_ENCODED_LEN};
+        let (_, address) = Address::from_bytes(&raw[..]).unwrap();
+        let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
+        let len = address.encode_into(hrp, &mut encoded[..]).unwrap();
+        String::from_utf8(encoded[..len].to_vec()).unwrap()
+    }
+
+    /// Each validator's balance is AVAX the user pays into the L1 and is left
+    /// out of the fee, and its owners decide who gets that balance back and
+    /// who can disable the validator. All of it has to be on screen: a host
+    /// could otherwise route a large balance to an owner it controls while
+    /// the review showed only a node id and a small fee.
+    #[test]
+    fn convert_subnet_to_l1_shows_validator_balance_and_owners() {
+        // Outside expert mode, which is what a normal review runs in; the
+        // host otherwise reports expert mode on.
+        crate::utils::set_expert_for_test(false);
+
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/parser/testvectors/convert_subnet_to_l1_validators.json"
+        );
+        let data: Vec<u8> = serde_json::from_reader(std::fs::File::open(path).unwrap()).unwrap();
+
+        for data in [&data[2..], COMPLEX_CONVERT_SUBNET] {
+            let (_, tx) = ConvertSubnetToL1Tx::from_bytes(data).unwrap();
+            let hrp = tx.tx_header.hrp().unwrap();
+            let shown = screens(&tx);
+            assert!(tx.validators.iter().count() > 0);
+
+            for validator in tx.validators.iter() {
+                let mut weight = [0; U64_FORMATTED_SIZE + 2];
+                let weight = u64_to_str(validator.weight, &mut weight).unwrap();
+                let weight = core::str::from_utf8(weight).unwrap();
+                assert!(
+                    shown.contains(&("Weight".into(), weight.into())),
+                    "weight not shown: {:#?}",
+                    shown
+                );
+
+                let mut balance = [0; U64_FORMATTED_SIZE + 2];
+                let balance = nano_avax_to_fp_str(validator.balance, &mut balance[..]).unwrap();
+                let balance = core::str::from_utf8(balance).unwrap();
+                assert!(
+                    shown.contains(&("Balance (AVAX)".into(), balance.into())),
+                    "balance not shown: {:#?}",
+                    shown
+                );
+
+                for raw in validator.remaining_balance_owner.addresses {
+                    assert!(
+                        shown.contains(&("Rem Addr".into(), bech32(hrp, raw))),
+                        "remaining balance owner not shown: {:#?}",
+                        shown
+                    );
+                }
+                for raw in validator.deactivation_owner.addresses {
+                    assert!(
+                        shown.contains(&("Disabler".into(), bech32(hrp, raw))),
+                        "deactivation owner not shown: {:#?}",
+                        shown
+                    );
+                }
+            }
+        }
+        crate::utils::set_expert_for_test(true);
+    }
+
+    /// Each validator's BLS public key is the key it will sign warp messages
+    /// with on the new L1. It is fixed by this transaction, so it has to be
+    /// on screen in every mode, after the balance and ahead of the owners.
+    #[test]
+    fn convert_subnet_to_l1_shows_validator_bls_key() {
+        crate::utils::set_expert_for_test(false);
+
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/parser/testvectors/convert_subnet_to_l1_validators.json"
+        );
+        let data: Vec<u8> = serde_json::from_reader(std::fs::File::open(path).unwrap()).unwrap();
+
+        for data in [&data[2..], COMPLEX_CONVERT_SUBNET] {
+            let (_, tx) = ConvertSubnetToL1Tx::from_bytes(data).unwrap();
+            let shown = screens(&tx);
+
+            for validator in tx.validators.iter() {
+                let key = format!("0x{}", hex::encode(validator.signer.public_key()));
+                let at = shown
+                    .iter()
+                    .position(|s| *s == ("Signer".into(), key.clone()))
+                    .unwrap_or_else(|| panic!("BLS key {} not shown: {:#?}", key, shown));
+                assert_eq!(shown[at - 1].0, "Balance (AVAX)", "{:#?}", shown);
+            }
+
+            // a different key is a different review
+            let first = tx.validators.iter().next().unwrap();
+            let key = first.signer.public_key();
+            let at = data.windows(key.len()).position(|w| w == &key[..]).unwrap();
+            let mut tampered = data.to_vec();
+            tampered[at] ^= 0x01;
+            let (_, other) = ConvertSubnetToL1Tx::from_bytes(&tampered).unwrap();
+            assert_ne!(shown, screens(&other));
+        }
+        crate::utils::set_expert_for_test(true);
+    }
+
+    /// The validator vector with both owners replaced by `owners`, the bytes
+    /// of the remaining-balance owner followed by the deactivation owner.
+    fn with_owners(owners: &[u8]) -> Vec<u8> {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/parser/testvectors/convert_subnet_to_l1_validators.json"
+        );
+        let data: Vec<u8> = serde_json::from_reader(std::fs::File::open(path).unwrap()).unwrap();
+        let data = &data[2..];
+        assert!(ConvertSubnetToL1Tx::from_bytes(data).is_ok());
+
+        // Both owners are threshold 1 over one address, and only the subnet
+        // auth (type id + one signature index) follows them.
+        let auth_len = 4 + 4 + 4;
+        let owner_len = 4 + 4 + crate::parser::ADDRESS_LEN;
+        let owners_end = data.len() - auth_len;
+        let owners_start = owners_end - 2 * owner_len;
+
+        let mut tampered = Vec::from(&data[..owners_start]);
+        tampered.extend_from_slice(owners);
+        tampered.extend_from_slice(&data[owners_end..]);
+        tampered
+    }
+
+    /// An owner with threshold 0 and no addresses is valid on chain (it is
+    /// what avalanche-cli leaves as the deactivation owner) and needs no
+    /// signature, so the review says so rather than showing nothing.
+    #[test]
+    fn convert_subnet_to_l1_shows_empty_validator_owners() {
+        crate::utils::set_expert_for_test(false);
+
+        let data = with_owners(&[0; 16]);
+        let (_, tx) = ConvertSubnetToL1Tx::from_bytes(&data).unwrap();
+        let shown = screens(&tx);
+
+        assert!(
+            shown.contains(&("Rem Addr".into(), "Anyone (no owner)".into())),
+            "{:#?}",
+            shown
+        );
+        assert!(
+            shown.contains(&("Disabler".into(), "Anyone".into())),
+            "{:#?}",
+            shown
+        );
+        crate::utils::set_expert_for_test(true);
+    }
+
+    /// A multi-address owner shows its threshold, so a 1-of-2 refund owner
+    /// cannot pass for a 2-of-2 one.
+    #[test]
+    fn convert_subnet_to_l1_shows_owner_threshold() {
+        let mut owners = Vec::new();
+        owners.extend_from_slice(&1u32.to_be_bytes());
+        owners.extend_from_slice(&2u32.to_be_bytes());
+        owners.extend_from_slice(&[0x11; crate::parser::ADDRESS_LEN]);
+        owners.extend_from_slice(&[0x22; crate::parser::ADDRESS_LEN]);
+        owners.extend_from_slice(&1u32.to_be_bytes());
+        owners.extend_from_slice(&1u32.to_be_bytes());
+        owners.extend_from_slice(&[0x33; crate::parser::ADDRESS_LEN]);
+
+        let data = with_owners(&owners);
+        let (_, tx) = ConvertSubnetToL1Tx::from_bytes(&data).unwrap();
+        let shown = screens(&tx);
+        let titles = shown.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>();
+
+        let rem = titles.iter().position(|t| *t == "Rem Addr").unwrap();
+        assert_eq!(
+            &titles[rem..rem + 4],
+            &["Rem Addr", "Rem Addr", "Threshold", "Disabler"],
+            "{:#?}",
+            shown
+        );
+        assert_eq!(shown[rem + 2].1, "1 of 2");
+    }
+
+    /// avalanchego rejects a zero threshold over a non-empty address set.
+    #[test]
+    fn convert_subnet_to_l1_rejects_zero_threshold_with_addresses() {
+        let owner = |threshold: u32| {
+            let mut o = threshold.to_be_bytes().to_vec();
+            o.extend_from_slice(&1u32.to_be_bytes());
+            o.extend_from_slice(&[0x11; crate::parser::ADDRESS_LEN]);
+            o
+        };
+
+        let mut good = owner(1);
+        good.extend(owner(1));
+        assert!(ConvertSubnetToL1Tx::from_bytes(&with_owners(&good)).is_ok());
+
+        let mut zero = owner(1);
+        zero.extend(owner(0));
+        assert!(ConvertSubnetToL1Tx::from_bytes(&with_owners(&zero)).is_err());
+    }
+
     #[test]
     fn convert_subnet_to_l1_out_of_range_item_is_an_error() {
         let mut title = [0u8; 64];
@@ -355,6 +629,23 @@ mod tests {
             assert!(tx
                 .render_item(u8::MAX, &mut title, &mut message, 0)
                 .is_err());
+        }
+    }
+
+    #[test]
+    fn every_field_is_initialised() {
+        for data in [SIMPLE_CONVERT_SUBNET, COMPLEX_CONVERT_SUBNET] {
+            // garbage stands in for uninitialised memory
+            let mut out = MaybeUninit::<ConvertSubnetToL1Tx>::uninit();
+            unsafe {
+                out.as_mut_ptr()
+                    .cast::<u8>()
+                    .write_bytes(0xFF, core::mem::size_of::<ConvertSubnetToL1Tx>());
+            }
+            ConvertSubnetToL1Tx::from_bytes_into(data, &mut out).unwrap();
+            let tx = unsafe { out.assume_init() };
+
+            assert_eq!(tx.address_len as usize, tx.address.len());
         }
     }
 }

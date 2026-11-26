@@ -72,7 +72,7 @@ zxerr_t addr_getNumItems(uint8_t *num_items) {
     return _addr_num_items(addr_ui_obj, num_items);
 }
 
-zxerr_t addr_getItem(int8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen, uint8_t pageIdx,
+zxerr_t addr_getItem(uint8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen, uint8_t pageIdx,
                      uint8_t *pageCount) {
     return _addr_get_item(addr_ui_obj, displayIdx, (uint8_t *)outKey, outKeyLen, (uint8_t *)outVal, outValLen, pageIdx,
                           pageCount);
@@ -90,7 +90,7 @@ zxerr_t addr_getNumItemsEd25519(uint8_t *num_items) {
     return zxerr_ok;
 }
 
-zxerr_t addr_getItemEd25519(int8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen,
+zxerr_t addr_getItemEd25519(uint8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen,
                             uint8_t pageIdx, uint8_t *pageCount) {
     ZEMU_LOGF(50, "[addr_getItem] %d/%d\n", displayIdx, pageIdx)
 

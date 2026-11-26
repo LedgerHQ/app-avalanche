@@ -17,7 +17,7 @@ use core::ops::Deref;
 
 use crate::parser::{
     error::ParserError, DisplayableItem, FromBytes, NFTMintOutput, NFTTransferOutput, Output,
-    OutputType, SECPMintOutput, SECPTransferOutput,
+    OutputLock, OutputType, SECPMintOutput, SECPTransferOutput,
 };
 
 use core::{mem::MaybeUninit, ptr::addr_of_mut};
@@ -34,6 +34,8 @@ impl AvmOutput<'_> {
         self.0.amount()
     }
 }
+impl OutputLock for AvmOutput<'_> {}
+
 impl<'b> Deref for AvmOutput<'b> {
     type Target = Output<'b>;
 

@@ -32,6 +32,7 @@ extern uint32_t hdPath_len;
 zxerr_t crypto_sign_avax(uint8_t *buffer, uint16_t signatureMaxlen, const uint8_t *message, uint16_t messageLen,
                          const uint32_t *path, uint16_t path_len, uint8_t curve_type);
 zxerr_t crypto_fill_ed25519_address(uint8_t *buffer, uint16_t buffer_len, uint16_t *addrLen);
+bool crypto_verify_nft_metadata(const uint8_t *hash, const uint8_t *sig, uint16_t sig_len);
 
 #ifdef __cplusplus
 }

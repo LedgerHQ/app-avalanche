@@ -45,6 +45,14 @@ pub struct InitialState<'b> {
     outputs: ObjectList<'b, AvmOutput<'b>>,
 }
 
+impl<'b> InitialState<'b> {
+    /// The outputs this asset starts with: who holds its initial supply and
+    /// who may mint more.
+    pub fn outputs(&self) -> &ObjectList<'b, AvmOutput<'b>> {
+        &self.outputs
+    }
+}
+
 impl<'b> FromBytes<'b> for InitialState<'b> {
     fn from_bytes_into(
         input: &'b [u8],

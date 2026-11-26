@@ -30,12 +30,12 @@ zxerr_t fill_address(uint32_t *flags, uint32_t *tx, uint32_t rx, uint8_t *buffer
 zxerr_t addr_getNumItems(uint8_t *num_items);
 
 // Gets an specific item from the address view (including paging)
-zxerr_t addr_getItem(int8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outValue, uint16_t outValueLen,
+zxerr_t addr_getItem(uint8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outValue, uint16_t outValueLen,
                      uint8_t pageIdx, uint8_t *pageCount);
 
 zxerr_t addr_getNumItemsEd25519(uint8_t *num_items);
 
-zxerr_t addr_getItemEd25519(int8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen,
+zxerr_t addr_getItemEd25519(uint8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen,
                             uint8_t pageIdx, uint8_t *pageCount);
 
 #ifdef __cplusplus

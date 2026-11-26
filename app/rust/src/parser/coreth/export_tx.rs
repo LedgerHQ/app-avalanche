@@ -27,13 +27,14 @@ use crate::{
     constants::chain_alias_lookup,
     handlers::handle_ui_message,
     parser::{
-        nano_avax_to_fp_str, ChainId, DisplayableItem, FromBytes, Header, ObjectList, OutputIdx,
-        ParserError, TransferableOutput, BLOCKCHAIN_ID_LEN, EVM_EXPORT_TX, MAX_ADDRESS_ENCODED_LEN,
+        nano_avax_to_fp_str, ChainId, DisplayableItem, FromBytes, Header,
+        ObjectList, OutputIdx, ParserError, TransferableOutput, BLOCKCHAIN_ID_LEN, EVM_EXPORT_TX,
         U64_FORMATTED_SIZE,
     },
 };
 
 use super::{inputs::EVMInput, outputs::EOutput};
+use crate::parser::title_export_amount;
 
 const DESTINATION_CHAIN_LEN: usize = BLOCKCHAIN_ID_LEN;
 const EXPORT_TX_DESCRIPTION_LEN: usize = 13; //X to C Chain
@@ -96,6 +97,19 @@ impl<'b> FromBytes<'b> for ExportTx<'b> {
         let outputs = unsafe { &mut *addr_of_mut!((*this).outputs).cast() };
         let rem = ObjectList::<TransferableOutput<EOutput>>::new_into(rem, outputs)?;
 
+        // Since Banff coreth rejects exports of anything but AVAX
+        // (ErrExportNonAVAXInputBanff, ErrExportNonAVAXOutputBanff). Refuse
+        // them here as well, so every amount shown is AVAX and so is the fee.
+        if let Some(avax) = unsafe { (*header).avax_asset_id() } {
+            let inputs = unsafe { inputs.assume_init_ref() };
+            let outputs = unsafe { outputs.assume_init_ref() };
+            if inputs.iter().any(|i| i.asset_id().id() != avax)
+                || outputs.iter().any(|o| o.asset_id().id() != avax)
+            {
+                return Err(ParserError::UnexpectedType.into());
+            }
+        }
+
         //good ptr and no uninit reads
         unsafe {
             addr_of_mut!((*this).destination_chain).write(destination_chain);
@@ -110,30 +124,12 @@ impl<'b> FromBytes<'b> for ExportTx<'b> {
 impl<'b> ExportTx<'b> {
     pub const TYPE_ID: u32 = EVM_EXPORT_TX;
 
-    pub fn disable_output_if(&mut self, address: &[u8]) {
-        let num_outs = self.outputs.iter().count();
-        // skip filtering out outputs if there is only one
-        if num_outs <= 1 {
-            return;
-        }
-
-        let mut idx = 0;
-        let mut render = self.renderable_out;
-
-        // outputs is define as an Object List of TransferableOutputs,
-        // when parsing transactions we ensure that it is not longer than
-        // 64, as we use that value as a limit for the bitwise operation,
-        // this ensures that render ^= 1 << idx never overflows.
-        self.outputs.iterate_with(|o| {
-            // The 99.99% of the outputs contain only one address(best case),
-            // In the worse case we just show every output.
-            if o.num_addresses() == 1 && o.contain_address(address) {
-                render ^= 1 << idx;
-            }
-            idx += 1;
-        });
-        self.renderable_out = render;
-    }
+    // No disable_output_if here on purpose, as in ImportTx. The C-chain
+    // side is account based, so an export has no change; an exported output
+    // matching a change path is funds sent to X/P under a key derived from
+    // the signing root, which for Core is the 44'/60' EVM root, and this app
+    // refuses X/P transactions under that root, so the user could not spend
+    // it with this device. Nothing may be hidden.
 
     fn fee(&self) -> Result<u64, ParserError> {
         let inputs = self.sum_inputs_amount()?;
@@ -185,7 +181,7 @@ impl<'b> ExportTx<'b> {
         // outputs is defined as an Object List of TransferableOutputs,
         // when parsing transactions we ensure that it is not longer than
         // 64, as we use that value as a limit for the bitwise operation,
-        // this ensures that render ^= 1 << idx never overflows.
+        // this ensures that 1 << idx never overflows.
         self.outputs.iterate_with(|o| {
             let render = self.renderable_out & (1 << idx);
             if render > 0 {
@@ -244,42 +240,17 @@ impl<'b> ExportTx<'b> {
         };
 
         let obj = self.outputs.get_obj_if(filter).ok_or(ViewError::NoData)?;
+        // Import/Export only supports secp_transfer types
+        let _ = obj.output().secp_transfer().ok_or(ViewError::NoData)?;
 
-        // ETH Import/Export only supports secp_transfer types
-        let obj = (*obj).secp_transfer().ok_or(ViewError::NoData)?;
+        let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+        let avax = self.tx_header.avax_asset_id();
+        let res = obj.render_item_with_hrp(hrp, avax, obj_item_n, title, message, page);
 
-        // get the number of items for Output
-        let num_inner_items = obj.num_items()?;
-
-        // do a custom rendering of the first base_output_items
-        match obj_item_n {
-            0 => {
-                // render amount
-                obj.render_item(0, title, message, page)
-            }
-            // address rendering, according to avax team 99.99% of transactions only comes with one
-            // address, but we support rendering any
-            x @ 1.. if x < num_inner_items => {
-                // get the address index
-                let address_idx = x - 1;
-                let address = obj
-                    .get_address_at(address_idx as usize)
-                    .ok_or(ViewError::NoData)?;
-                // render encoded address with proper hrp,
-                let t = pic_str!(b"Address");
-                title[..t.len()].copy_from_slice(t);
-
-                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
-                let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
-
-                let addr_len = address
-                    .encode_into(hrp, &mut encoded[..])
-                    .map_err(|_| ViewError::Unknown)?;
-
-                handle_ui_message(&encoded[..addr_len], message, page)
-            }
-            _ => Err(ViewError::NoData),
+        if obj_item_n == 0 {
+            title_export_amount(self.destination_chain, title)?;
         }
+        res
     }
 
     fn render_export_description(
@@ -359,6 +330,84 @@ impl DisplayableItem for ExportTx<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exported_outputs_are_never_hidden_as_change() {
+        use crate::parser::Transaction;
+        use std::prelude::v1::*;
+
+        // An exported output to hash160 of 44'/60'/0'/{0,1}/i matched the
+        // change filter and was hidden, although it lands on X/P under a key
+        // this app will not sign X/P transactions with.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/parser/testvectors/c_export_to_x.json"
+        );
+        let mut data: Vec<u8> =
+            serde_json::from_reader(std::fs::File::open(path).unwrap()).unwrap();
+
+        // The vector's single exported output is the last thing in it. Add a
+        // second one to another address, so neither the single-output
+        // shortcut nor the show-everything rule can mask a hidden output.
+        let at = data
+            .windows(32)
+            .rposition(|w| w == crate::parser::AVAX_ASSET_ID_LOCAL)
+            .unwrap();
+        assert_eq!(data[at - 4..at], 1u32.to_be_bytes());
+        data[at - 4..at].copy_from_slice(&2u32.to_be_bytes());
+        let mut output = data[at..].to_vec();
+        let len = output.len();
+        output[len - 20..].copy_from_slice(&[0xa5; 20]);
+        data.extend(output);
+
+        let mut tx = Transaction::new(&data).unwrap();
+        let unfiltered = DisplayableItem::num_items(&tx).unwrap();
+        let Transaction::CExport(export) = &tx else {
+            panic!("not a CExport")
+        };
+        let first = export.outputs.iter().next().unwrap();
+        let address = *first.output().get_address(0).unwrap().raw_address();
+
+        tx.disable_output_if(&address);
+        tx.show_outputs_if_all_hidden();
+        assert_eq!(DisplayableItem::num_items(&tx).unwrap(), unfiltered);
+    }
+
+    #[test]
+    fn non_avax_assets_are_rejected() {
+        use crate::parser::{Transaction, AVAX_ASSET_ID_LOCAL};
+        use std::prelude::v1::*;
+
+        // coreth has refused atomic transactions in any asset but AVAX since
+        // Banff, while the review shows these amounts as AVAX. Swap each AVAX
+        // asset id of this local-network vector, in turn, for another asset.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/parser/testvectors/c_export_to_x.json"
+        );
+        let data: Vec<u8> =
+            serde_json::from_reader(std::fs::File::open(path).unwrap()).unwrap();
+        assert!(Transaction::new(&data).is_ok());
+
+        let positions: Vec<usize> = data
+            .windows(32)
+            .enumerate()
+            .filter(|(_, w)| *w == AVAX_ASSET_ID_LOCAL)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(positions.len() >= 2, "an input and an output in AVAX");
+
+        for at in positions {
+            let mut swapped = data.clone();
+            swapped[at..at + 32].copy_from_slice(&[0x5c; 32]);
+            assert_eq!(
+                Transaction::new(&swapped).unwrap_err(),
+                ParserError::UnexpectedType,
+                "asset at {}",
+                at
+            );
+        }
+    }
 
     const DATA: &[u8] = &[
         0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x9d, 0x07, 0x75, 0xf4, 0x50, 0x60, 0x4b,

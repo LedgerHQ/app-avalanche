@@ -35,6 +35,9 @@ mod parser;
 mod sys;
 mod zxerror;
 
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+mod aeabi_unaligned;
+
 pub use zxerror::ZxError;
 
 pub(crate) use sys::*;
