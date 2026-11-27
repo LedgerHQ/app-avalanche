@@ -173,7 +173,8 @@ pub fn handle_apdu(flags: &mut u32, tx: &mut u32, rx: u32, apdu_buffer: &mut [u8
                 ApduError::OutputBufferTooSmall as u16
             }
             Err(e) => e,
-            Ok(_) => unsafe { core::hint::unreachable_unchecked() },
+            // `.and(Err(Success))` above never yields Ok; fail closed if it did
+            Ok(_) => ApduError::ExecutionError as u16,
         },
         Err(_) => ApduError::WrongLength as u16,
     };

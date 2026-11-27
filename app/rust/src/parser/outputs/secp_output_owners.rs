@@ -25,8 +25,12 @@ use crate::{
     checked_add,
     handlers::handle_ui_message,
     parser::{
-        u64_to_str, Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN,
-        MAX_ADDRESSES, MAX_ADDRESS_ENCODED_LEN, U64_FORMATTED_SIZE
+        outputs::{
+            address_items, check_locktime, check_threshold, render_locktime, render_no_owner,
+            render_threshold, shows_threshold,
+        },
+        Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES,
+        MAX_ADDRESS_ENCODED_LEN,
     },
 };
 
@@ -98,9 +102,11 @@ impl<'b> FromBytes<'b> for SECPOutputOwners<'b> {
         let addresses =
             bytemuck::try_cast_slice(addresses).map_err(|_| ParserError::InvalidAddressLength)?;
 
-        if threshold as usize > addresses.len() {
-            return Err(ParserError::InvalidThreshold.into());
-        }
+        // threshold 0 is accepted and shown, see check_threshold
+        check_threshold(threshold, addresses.len())?;
+
+        // the locktime is shown as a date
+        check_locktime(locktime)?;
 
         //good ptr and no uninit reads
         let out = out.as_mut_ptr();
@@ -114,13 +120,84 @@ impl<'b> FromBytes<'b> for SECPOutputOwners<'b> {
     }
 }
 
+impl SECPOutputOwners<'_> {
+    /// Render one counted item, encoding addresses under `hrp`.
+    ///
+    /// num_items counts a Locktime screen ahead of the addresses whenever
+    /// locktime is non-zero, so any caller that renders these items has to
+    /// apply the same offset. Keeping that arithmetic here means a caller
+    /// cannot get it wrong.
+    pub fn render_item_with_hrp(
+        &self,
+        hrp: &str,
+        item_n: u8,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
+        use bolos::{pic_str, PIC};
+
+        let label = pic_str!(b"Owner address");
+        self.render_item_with_label(hrp, label, item_n, title, message, page)
+    }
+
+    /// Same as render_item_with_hrp, titling the address screens with
+    /// `address_label` (for instance "Rewards to") instead of "Owner address".
+    pub fn render_item_with_label(
+        &self,
+        hrp: &str,
+        address_label: &[u8],
+        item_n: u8,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
+        use bolos::{pic_str, PIC};
+
+        let addr_items = address_items(self.addresses.len());
+        let mut item_index = item_n;
+
+        if self.locktime > 0 {
+            if item_index == 0 {
+                // a date, not the raw unix time it used to be
+                let label = pic_str!(b"Locktime");
+                return render_locktime(label, self.locktime, title, message, page);
+            }
+            item_index -= 1;
+        }
+
+        if item_index < addr_items {
+            if self.addresses.is_empty() {
+                // Threshold 0 with no address: anyone can claim what these
+                // owners control (rewards, a subnet) with no signature. It
+                // used to contribute no screen at all.
+                let anyone = pic_str!(b"Anyone");
+                return render_no_owner(address_label, anyone, title, message, page);
+            }
+            title[..address_label.len()].copy_from_slice(address_label);
+            self.render_address_with_hrp(hrp, item_index as usize, message, page)
+        } else if item_index == addr_items && shows_threshold(self.threshold, self.addresses.len())
+        {
+            render_threshold(self.threshold, self.addresses.len(), title, message, page)
+        } else {
+            Err(ViewError::NoData)
+        }
+    }
+}
+
 impl DisplayableItem for SECPOutputOwners<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        // show an item for each address in the list
-        let items = self.addresses.len() as u8;
-        // show locktime only if it is higher than zero,
-        // that is why we sum up this boolean
-        checked_add!(ViewError::Unknown, items, (self.locktime > 0) as u8)
+        // show an item for each address in the list, or one saying anyone
+        // can act for these owners when there is none
+        let items = address_items(self.addresses.len());
+        // show locktime only if it is higher than zero, and the threshold only
+        // with several addresses, that is why we sum up these booleans
+        checked_add!(
+            ViewError::Unknown,
+            items,
+            (self.locktime > 0) as u8,
+            shows_threshold(self.threshold, self.addresses.len()) as u8
+        )
     }
 
     #[inline(never)]
@@ -131,31 +208,9 @@ impl DisplayableItem for SECPOutputOwners<'_> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
-        use bolos::{pic_str, PIC};
-
-        let mut buffer = [0; U64_FORMATTED_SIZE + 2];
-
-        let addr_items = self.addresses.len() as u8;
-        let mut item_index = item_n;
-
-        if self.locktime > 0 {
-            if item_index == 0 {
-                let title_content = pic_str!(b"Locktime");
-                title[..title_content.len()].copy_from_slice(title_content);
-                let buffer =
-                    u64_to_str(self.locktime, &mut buffer).map_err(|_| ViewError::Unknown)?;
-                return handle_ui_message(buffer, message, page);
-            }
-            item_index -= 1;
-        }
-
-        if item_index < addr_items {
-            let label = pic_str!(b"Owner address");
-            title[..label.len()].copy_from_slice(label);
-            self.render_address_with_hrp("", item_index as usize, message, page)
-        } else {
-            Err(ViewError::NoData)
-        }
+        // No network context here; callers that have one should use
+        // render_item_with_hrp.
+        self.render_item_with_hrp("", item_n, title, message, page)
     }
 }
 
@@ -174,5 +229,133 @@ mod tests {
         assert_eq!(owner.locktime, 12);
         assert_eq!(owner.threshold, 1);
         assert_eq!(owner.addresses.len(), 1);
+    }
+
+    #[test]
+    fn owners_with_threshold_zero_are_accepted_and_shown() {
+        use crate::parser::tx_builder::{owners, render_all, RECIPIENT};
+        use std::prelude::v1::*;
+
+        // No addresses: anyone can claim what they own (rewards, a subnet)
+        // with no signature. Accepted as it always was, with a screen saying
+        // so where it used to have none.
+        let raw = owners(0, 0, &[]);
+        let (_, empty) = SECPOutputOwners::from_bytes(&raw).unwrap();
+        assert_eq!(render_all(&empty), ["Owner address: Anyone"]);
+        let mut title = [0; 20];
+        let mut message = [0; 40];
+        empty
+            .render_item_with_label("fuji", b"Rewards to", 0, &mut title, &mut message, 0)
+            .unwrap();
+        assert!(title.starts_with(b"Rewards to\0"));
+        assert!(message.starts_with(b"Anyone\0"));
+
+        // and with a locktime, that too
+        let raw = owners(4_102_444_800, 0, &[]);
+        let (_, locked) = SECPOutputOwners::from_bytes(&raw).unwrap();
+        assert_eq!(
+            render_all(&locked),
+            ["Locktime: 2100-01-01 00:00:00 UTC", "Owner address: Anyone"]
+        );
+
+        // With addresses avalanchego refuses it; accepted as it was, with
+        // its threshold shown.
+        let raw = owners(0, 0, &[RECIPIENT]);
+        let (_, zero_of_one) = SECPOutputOwners::from_bytes(&raw).unwrap();
+        let screens = render_all(&zero_of_one);
+        assert_eq!(screens.len(), 2, "{:#?}", screens);
+        assert_eq!(screens[1], "Threshold: 0 of 1");
+
+        // a threshold above the number of addresses is still refused
+        for raw in [owners(0, 1, &[]), owners(0, 2, &[RECIPIENT])] {
+            let err = SECPOutputOwners::from_bytes(&raw).unwrap_err();
+            assert_eq!(err, ParserError::InvalidThreshold.into());
+        }
+    }
+
+    #[test]
+    fn empty_rewards_owner_is_shown() {
+        use crate::parser::tx_builder::*;
+        use std::prelude::v1::*;
+
+        // The rewards owner contributed no screen at all, so the review looked
+        // the same as one paying rewards to the user.
+        let ins = [input(1, &FUJI_AVAX, 3_000_000_000_000)];
+        let stake = [out(2_000_000_000_000, CHANGE)];
+        let tx = add_delegator(&[], &ins, &stake, owners(0, 0, &[]));
+        let shown = screens(&tx, None);
+        assert_eq!(
+            shown
+                .iter()
+                .filter(|s| s.starts_with("Rewards to: "))
+                .collect::<Vec<_>>(),
+            ["Rewards to: Anyone"]
+        );
+        let to_user = add_delegator(&[], &ins, &stake, owners(0, 1, &[CHANGE]));
+        assert_ne!(shown, screens(&to_user, None));
+    }
+
+    #[test]
+    fn multisig_owners_show_their_threshold() {
+        use crate::parser::tx_builder::*;
+        use std::prelude::v1::*;
+
+        let raw = owners(0, 1, &[RECIPIENT, ATTACKER]);
+        let (_, owners_1_of_2) = SECPOutputOwners::from_bytes(&raw).unwrap();
+        assert_eq!(owners_1_of_2.num_items().unwrap(), 3);
+        let rendered = render_all(&owners_1_of_2);
+        assert_eq!(rendered.last().unwrap(), "Threshold: 1 of 2");
+
+        // In a transaction: rewards paid to a 1-of-2 owner that includes an
+        // attacker looked the same as rewards to a 2-of-2 one.
+        let ins = [input(1, &FUJI_AVAX, 3_000_000_000_000)];
+        let stake = [out(2_000_000_000_000, CHANGE)];
+        let tx = |threshold| {
+            add_delegator(&[], &ins, &stake, owners(0, threshold, &[CHANGE, ATTACKER]))
+        };
+        let one_of_two = screens(&tx(1), None);
+        assert_ne!(one_of_two, screens(&tx(2), None));
+        assert!(one_of_two.contains(&"Threshold: 1 of 2".to_string()));
+        assert_eq!(
+            one_of_two.iter().filter(|s| s.starts_with("Rewards to: ")).count(),
+            2
+        );
+    }
+
+    #[test]
+    fn owners_locktime_item_is_renderable() {
+        // This vector carries locktime 12, so num_items counts a Locktime
+        // screen ahead of the single address. Every counted item has to
+        // render: the caller in CreateSubnet used to pass this index straight
+        // through as an address index, which skipped Locktime and ran the last
+        // index off the end of the address list.
+        let (_, owners) = SECPOutputOwners::from_bytes(DATA).unwrap();
+        assert!(owners.locktime > 0);
+
+        let items = owners.num_items().expect("Overflow?");
+        assert_eq!(items as usize, owners.num_addresses() + 1);
+
+        let mut title = [0u8; 64];
+        let mut message = [0u8; 256];
+        for i in 0..items {
+            assert!(
+                owners
+                    .render_item_with_hrp("fuji", i, &mut title, &mut message, 0)
+                    .is_ok(),
+                "counted item {} did not render",
+                i
+            );
+        }
+
+        // First screen is the locktime, not an address.
+        owners
+            .render_item_with_hrp("fuji", 0, &mut title, &mut message, 0)
+            .unwrap();
+        assert!(title.starts_with(b"Locktime"));
+
+        // One past the end is an error rather than a stale screen.
+        assert!(owners
+            .render_item_with_hrp("fuji", items, &mut title, &mut message, 0)
+            .is_err());
     }
 }

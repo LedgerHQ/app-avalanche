@@ -303,3 +303,65 @@ impl AvaxSign {
         })
     }
 }
+
+/// Status word of the first chunk of `op` the handler refuses, if any
+fn sign_refused(op: &AvaxSign) -> Option<String> {
+    for mut chunk in op.get_chunks() {
+        let response = handle_apdu(&mut 0, &mut 0, 260, &mut chunk);
+        let status = &response[response.len() - 2..];
+        if status != [0x90, 0x00] {
+            return Some(hex::encode(status));
+        }
+    }
+    None
+}
+
+const P_ROOT: [u32; 3] = [0x8000_0000 + 44, 0x8000_0000 + 9000, 0x8000_0000];
+const ETH_ROOT: [u32; 3] = [0x8000_0000 + 44, 0x8000_0000 + 60, 0x8000_0000];
+
+// Hosts (the JS SDK, Core) send whatever change and signing paths they use,
+// and the JS SDK adds the signing paths to the change list. Any two-component
+// suffix is accepted, as develop did: only the outputs a change path's address
+// owns alone, unlocked, threshold 1 and in AVAX are hidden, and never all.
+#[test]
+#[cfg_attr(not(miri), file_serial(path))]
+fn any_two_component_change_path_is_accepted() {
+    for change in [
+        [0, 0],
+        [1, 5],
+        [5, 8],
+        [2, 0],
+        [0x8000_0000, 0],
+        [1, 0x8000_0000],
+        [1, 0x7fff_ffff],
+    ] {
+        let op = AvaxSign::new(P_ROOT, &[change], P_CREATE_CHAIN, &[change]);
+        assert_eq!(sign_refused(&op), None, "change path {:x?} refused", change);
+
+        let op = AvaxSign::new(P_ROOT, &[change], P_CREATE_CHAIN, &[change]);
+        assert_eq!(op.send().len(), 1, "change path {:x?}", change);
+    }
+}
+
+// Core signs with the 44'/60' root as well as 44'/9000', for X/P transactions
+// too; develop accepted either root for every transaction type.
+#[test]
+#[cfg_attr(not(miri), file_serial(path))]
+fn eth_root_is_accepted_for_p_chain_transactions() {
+    for root in [P_ROOT, ETH_ROOT] {
+        let op = AvaxSign::new(root, &[[0, 0]], P_CREATE_CHAIN, &[[1, 5]]);
+        assert_eq!(sign_refused(&op), None, "root {:x?} refused", root);
+
+        let op = AvaxSign::new(root, &[[0, 0]], P_CREATE_CHAIN, &[[1, 5]]);
+        assert_eq!(op.send().len(), 1, "root {:x?}", root);
+    }
+}
+
+// A change path still has to be two components after the root.
+#[test]
+#[cfg_attr(not(miri), file_serial(path))]
+fn change_path_of_other_depth_is_refused() {
+    let mut op = AvaxSign::new(P_ROOT, &[[0, 0]], P_CREATE_CHAIN, &[[1, 5]]);
+    op.change = std::vec![BIP32Path::new([1u32]).unwrap()];
+    assert!(sign_refused(&op).is_some());
+}

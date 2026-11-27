@@ -22,19 +22,40 @@ use zemu_sys::{Show, ViewError, Viewable};
 
 use crate::{
     constants::{
-        ApduError as Error, BIP32_PATH_PREFIX_DEPTH, BIP32_PATH_SUFFIX_DEPTH, FIRST_MESSAGE,
-        LAST_MESSAGE, MAX_BIP32_PATH_DEPTH,
+        ApduError as Error, BIP32_PATH_SUFFIX_DEPTH, FIRST_MESSAGE, LAST_MESSAGE,
+        MAX_BIP32_PATH_DEPTH,
     },
     crypto::{Curve, ECCInfoFlags},
     dispatcher::ApduHandler,
     handlers::{
+        avax::verify_avax_root_path,
         handle_ui_message,
-        resources::{HASH, PATH},
+        resources::{HASHAccessors, HASH, HASH_APPROVED, PATH},
     },
     parser::{FromBytes, ParserError, PathWrapper},
     sys,
     utils::{convert_der_to_rs, ApduBufferRead},
 };
+
+// HASH alone is not proof of approval: the sign-hash flow stores the
+// requested hash as soon as FIRST_MESSAGE parses, so the review can show it.
+// Every signature must check HASH_APPROVED, which only an approve callback
+// sets and every new request or cleanup clears. It is a lazy_static resource
+// like HASH: a plain Rust static is not placed where the app expects.
+
+/// Record that the user approved the hash stored in HASH.
+pub fn mark_hash_approved() {
+    unsafe { *crate::lock_mut!(HASH_APPROVED).lock(HASHAccessors::SignHash) = true };
+}
+
+/// Forget any approval, before HASH changes or once it is released.
+pub fn clear_hash_approval() {
+    unsafe { *crate::lock_mut!(HASH_APPROVED).lock(HASHAccessors::SignHash) = false };
+}
+
+fn hash_approved() -> bool {
+    unsafe { *crate::lock_mut!(HASH_APPROVED).lock(HASHAccessors::SignHash) }
+}
 
 pub struct Sign;
 
@@ -50,11 +71,20 @@ impl Sign {
         }
     }
 
+    /// The stored hash, approved or not: what the review displays.
     pub fn get_hash() -> Result<&'static [u8; Self::SIGN_HASH_SIZE], Error> {
         match unsafe { crate::lock_mut!(HASH).acquire(Self) } {
             Ok(Some(some)) => Ok(some),
             _ => Err(Error::ApduCodeConditionsNotSatisfied),
         }
+    }
+
+    /// The stored hash, only once the user approved it: what may be signed.
+    pub fn get_approved_hash() -> Result<&'static [u8; Self::SIGN_HASH_SIZE], Error> {
+        if !hash_approved() {
+            return Err(Error::ApduCodeConditionsNotSatisfied);
+        }
+        Self::get_hash()
     }
 
     //(actual_size, [u8; MAX_SIGNATURE_SIZE])
@@ -80,16 +110,12 @@ impl Sign {
         let rem =
             PathWrapper::from_bytes_into(data, &mut path).map_err(|_| ParserError::InvalidPath)?;
         let root_path = unsafe { path.assume_init().path() };
+        // Must be a canonical AVAX signing root (m/44'/9000'/account').
+        verify_avax_root_path(&root_path).map_err(|_| ParserError::InvalidPath)?;
 
-        //We expect a path prefix of the form x'/x'/x'
-        if root_path.components().len() != BIP32_PATH_PREFIX_DEPTH {
-            return Err(ParserError::InvalidPath);
-        }
-
-        unsafe {
-            crate::lock_mut!(PATH).lock(Self).replace(root_path);
-        }
-
+        // Validate the whole request before touching the stored state.
+        // Replacing PATH first let a FIRST_MESSAGE with a bad hash length swap
+        // the root under a HASH left over from an earlier review.
         if rem.len() != Self::SIGN_HASH_SIZE {
             return Err(ParserError::ValueOutOfRange);
         }
@@ -97,7 +123,11 @@ impl Sign {
         let mut unsigned_hash = [0; Self::SIGN_HASH_SIZE];
         unsigned_hash.copy_from_slice(rem);
 
+        // The hash is stored now so the review can show it, but it is not
+        // approved: nothing may sign it until the user accepts the review.
+        clear_hash_approval();
         unsafe {
+            crate::lock_mut!(PATH).lock(Self).replace(root_path);
             crate::lock_mut!(HASH).lock(Self).replace(unsigned_hash);
         }
 
@@ -110,18 +140,16 @@ impl Sign {
         let mut path = MaybeUninit::uninit();
         let rem = PathWrapper::from_bytes_into(data, &mut path).map_err(|_| Error::Unknown)?;
         let root_path = unsafe { path.assume_init().path() };
+        // Must be a canonical AVAX signing root (m/44'/9000'/account').
+        verify_avax_root_path(&root_path)?;
 
-        //We expect a path prefix of the form x'/x'/x'
-        if root_path.components().len() != BIP32_PATH_PREFIX_DEPTH {
+        // Same ordering as parse_hash: check the length before replacing PATH.
+        if rem.len() != Self::SIGN_HASH_SIZE {
             return Err(Error::WrongLength);
         }
 
         unsafe {
             crate::lock_mut!(PATH).lock(Self).replace(root_path);
-        }
-
-        if rem.len() != Self::SIGN_HASH_SIZE {
-            return Err(Error::WrongLength);
         }
 
         let mut unsigned_hash = [0; Self::SIGN_HASH_SIZE];
@@ -135,12 +163,10 @@ impl Sign {
     }
 
     pub fn get_signing_info(data: &[u8]) -> Result<BIP32Path<MAX_BIP32_PATH_DEPTH>, Error> {
+        // The stored prefix must still be a canonical AVAX signing root
+        // (m/44'/9000'/account'); re-check on every continuation APDU.
         let path_prefix = Self::get_derivation_info()?;
-
-        //We expect a path prefix of the form x'/x'/x'
-        if path_prefix.components().len() != BIP32_PATH_PREFIX_DEPTH {
-            return Err(Error::WrongLength);
-        }
+        verify_avax_root_path(path_prefix)?;
 
         let suffix: BIP32Path<BIP32_PATH_SUFFIX_DEPTH> =
             BIP32Path::read(data).map_err(|_| Error::DataInvalid)?;
@@ -202,7 +228,6 @@ impl Viewable for SignUI {
         handle_ui_message(&hex[..size], message, page)
     }
 
-
     fn accept(&mut self, _out: &mut [u8]) -> (usize, u16) {
         let tx = 0;
 
@@ -211,6 +236,7 @@ impl Viewable for SignUI {
         unsafe {
             crate::lock_mut!(HASH).lock(Sign).replace(self.hash);
         }
+        mark_hash_approved();
 
         (tx, Error::Success as _)
     }
@@ -227,7 +253,6 @@ impl ApduHandler for Sign {
         sys::zemu_log_stack("SignHash::handle\x00");
 
         *tx = 0;
-        let mut offset = 0;
 
         let p1 = buffer.p1();
         let cdata = buffer.payload().map_err(|_| Error::DataInvalid)?;
@@ -237,12 +262,40 @@ impl ApduHandler for Sign {
         // either for signing transactions, messages or a hash all of them,
         // previously reviewed.
         if p1 == FIRST_MESSAGE {
-            return Self::start_sign(cdata, flags).map(|_| ());
+            let result = Self::start_sign(cdata, flags).map(|_| ());
+            // A refused FIRST_MESSAGE starts no session, and must not leave
+            // an earlier one live either.
+            if result.is_err() {
+                let _ = cleanup_globals();
+            }
+            return result;
         }
+
+        let result = Self::sign_with_suffix(buffer, tx);
+
+        // LAST_MESSAGE is the host telling us it is done, and a host is free
+        // never to send it -- so it cannot be the only thing that releases the
+        // reviewed hash. A failure here ends the session just as definitively:
+        // whatever the host sent was refused, or the signature could not be
+        // produced, and in both cases leaving (PATH, HASH) live lets a later
+        // APDU still sign a hash that was reviewed for an earlier request.
+        if result.is_err() || p1 == LAST_MESSAGE {
+            let _ = cleanup_globals();
+        }
+
+        result
+    }
+}
+
+impl Sign {
+    #[inline(never)]
+    fn sign_with_suffix(buffer: ApduBufferRead<'_>, tx: &mut u32) -> Result<(), Error> {
+        let mut offset = 0;
+        let cdata = buffer.payload().map_err(|_| Error::DataInvalid)?;
 
         // retrieve signing info
         let path_prefix = Sign::get_signing_info(cdata)?;
-        let hash = Self::get_hash()?;
+        let hash = Self::get_approved_hash()?;
 
         let (flags, sig_size, mut sig) = Sign::sign(&path_prefix, hash)?;
         let out = buffer.write();
@@ -282,16 +335,13 @@ impl ApduHandler for Sign {
         out[offset] = v;
         offset += 1;
 
-        if p1 == LAST_MESSAGE {
-            let _ = cleanup_globals();
-        }
-
         *tx = offset as _;
         Ok(())
     }
 }
 
 pub fn cleanup_globals() -> Result<(), Error> {
+    clear_hash_approval();
     unsafe {
         if let Ok(path) = crate::lock_mut!(PATH).acquire(Sign) {
             path.take();

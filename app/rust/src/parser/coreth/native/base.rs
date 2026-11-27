@@ -121,6 +121,11 @@ impl BaseLegacy<'_> {
         page: u8,
     ) -> Result<u8, ViewError> {
         let render_funding = !self.value.is_empty();
+        // contract, gas limit and funding (if any) come before the data
+        let data_start = 2 + render_funding as u8;
+        let data_end = data_start
+            .checked_add(self.data.num_items()?)
+            .ok_or(ViewError::Unknown)?;
         match item_n {
             0 => {
                 let label = pic_str!(b"Contract");
@@ -139,18 +144,18 @@ impl BaseLegacy<'_> {
                 render_u256(&self.value, WEI_NAVAX_DIGITS, message, page)
             }
             // A deploy with no value contributes no "Funding Contract" screen,
-            // so everything after it moves down one index. Deriving the last
-            // index from num_items keeps the arms and the count in step for
-            // both shapes; fixed indices left a hole at item 2 in the
-            // no-value case, and a hole reads as end-of-items to the review
-            // loop, which would end the review before the data and fee
-            // screens. This mirrors the EIP-1559 renderer.
-            x @ 2.. if !render_funding && x == 2 || render_funding && x == 3 => {
-                self.data.render_item(0, title, message, page)
+            // so everything after it moves down one index. The data screens
+            // and the fee are placed from the data's own item count, so the
+            // arms stay in step with num_items for both shapes: a hole reads
+            // as end-of-items to the review loop, which would end the review
+            // before the fee screen.
+            x if (data_start..data_end).contains(&x) => {
+                self.data.render_item(x - data_start, title, message, page)
             }
-            x @ 3.. if x == self.num_items()? - 1 => {
+            x if x == data_end => {
                 let label = pic_str!(b"Maximum Fee(GWEI)");
                 title[..label.len()].copy_from_slice(label);
+
                 self.render_fee(message, page)
             }
             _ => Err(ViewError::NoData),
@@ -188,6 +193,11 @@ impl BaseLegacy<'_> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
+        // contract, transfer and to come before the data
+        const DATA_START: u8 = 3;
+        let data_end = DATA_START
+            .checked_add(self.data.num_items()?)
+            .ok_or(ViewError::Unknown)?;
         match item_n {
             0 => {
                 let label = pic_str!(b"Contract");
@@ -216,8 +226,10 @@ impl BaseLegacy<'_> {
                     .apdu_unwrap()
                     .render_eth_address(message, page)
             }
-            3 => self.data.render_item(0, title, message, page),
-            4 => {
+            x if (DATA_START..data_end).contains(&x) => {
+                self.data.render_item(x - DATA_START, title, message, page)
+            }
+            x if x == data_end => {
                 let label = pic_str!(b"Maximun Fee(GWEI)");
                 title[..label.len()].copy_from_slice(label);
 
@@ -239,14 +251,16 @@ impl BaseLegacy<'_> {
     ) -> Result<u8, ViewError> {
         let erc20 = match self.data {
             EthData::Erc20(erc20) => erc20,
-            _ => unsafe { core::hint::unreachable_unchecked() },
+            _ => return Err(ViewError::Unknown),
         };
 
         let erc_num_items = erc20.num_items()?;
+        let value_items = self.token_value_items();
 
         match item_n {
             x if (0..erc_num_items).contains(&x) => erc20.render_item(item_n, title, message, page),
-            x if x == erc_num_items => {
+            x if x < erc_num_items + value_items => self.render_token_value(title, message, page),
+            x if x == erc_num_items + value_items => {
                 let label = pic_str!(b"Contract");
                 title[..label.len()].copy_from_slice(label);
 
@@ -256,7 +270,7 @@ impl BaseLegacy<'_> {
                     .apdu_unwrap()
                     .render_eth_address(message, page)
             }
-            x if x == erc_num_items + 1 => {
+            x if x == erc_num_items + value_items + 1 => {
                 let label = pic_str!(b"Maximun Fee(GWEI)");
                 title[..label.len()].copy_from_slice(label);
 
@@ -277,16 +291,18 @@ impl BaseLegacy<'_> {
     ) -> Result<u8, ViewError> {
         let erc721 = match self.data {
             EthData::Erc721(erc721) => erc721,
-            _ => unsafe { core::hint::unreachable_unchecked() },
+            _ => return Err(ViewError::Unknown),
         };
 
         let erc_num_items = erc721.num_items()?;
+        let value_items = self.token_value_items();
 
         match item_n {
             x if (0..erc_num_items).contains(&x) => {
                 erc721.render_item(item_n, title, message, page)
             }
-            x if x == erc_num_items => {
+            x if x < erc_num_items + value_items => self.render_token_value(title, message, page),
+            x if x == erc_num_items + value_items => {
                 let label = pic_str!(b"Contract");
                 title[..label.len()].copy_from_slice(label);
 
@@ -296,7 +312,7 @@ impl BaseLegacy<'_> {
                     .apdu_unwrap()
                     .render_eth_address(message, page)
             }
-            x if x == erc_num_items + 1 => {
+            x if x == erc_num_items + value_items + 1 => {
                 let label = pic_str!(b"Maximun Fee(GWEI)");
                 title[..label.len()].copy_from_slice(label);
 
@@ -304,6 +320,29 @@ impl BaseLegacy<'_> {
             }
             _ => Err(ViewError::NoData),
         }
+    }
+
+    /// 1 when the transaction moves native value next to a token call, whose
+    /// view then carries an extra screen for it
+    fn token_value_items(&self) -> u8 {
+        !self.value.is_zero() as u8
+    }
+
+    /// The native value sent along with a token call
+    fn render_token_value(
+        &self,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
+        let label = pic_str!(b"Value");
+        title[..label.len()].copy_from_slice(label);
+
+        let curr = self.currency_prefix();
+        let (prefix, message) = message.split_at_mut(curr.len());
+        prefix.copy_from_slice(curr);
+
+        render_u256(&self.value, WEI_AVAX_DIGITS, message, page)
     }
 
     #[inline(never)]
@@ -402,12 +441,22 @@ impl DisplayableItem for BaseLegacy<'_> {
             EthData::AssetCall(d) => d.num_items()?.checked_add(1).ok_or(ViewError::Unknown)?,
             // description amount, address, fee and contract_data
             EthData::ContractCall(d) => d.num_items()?.checked_add(4).ok_or(ViewError::Unknown)?,
-            // address, fee
+            // address, fee, native value (if not zero)
             #[cfg(feature = "erc20")]
-            EthData::Erc20(d) => d.num_items()?.checked_add(2).ok_or(ViewError::Unknown)?,
-            // contract address, fee
+            EthData::Erc20(d) => checked_add!(
+                ViewError::Unknown,
+                2u8,
+                d.num_items()?,
+                self.token_value_items()
+            )?,
+            // contract address, fee, native value (if not zero)
             #[cfg(feature = "erc721")]
-            EthData::Erc721(d) => d.num_items()?.checked_add(2).ok_or(ViewError::Unknown)?,
+            EthData::Erc721(d) => checked_add!(
+                ViewError::Unknown,
+                2u8,
+                d.num_items()?,
+                self.token_value_items()
+            )?,
         };
 
         Ok(items)

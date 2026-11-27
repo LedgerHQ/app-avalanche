@@ -23,12 +23,10 @@ use bolos::{
 use zemu_sys::{Show, ViewError, Viewable};
 
 use crate::{
-    constants::{
-        ApduError as Error, BIP32_PATH_PREFIX_DEPTH, BIP32_PATH_SUFFIX_DEPTH, MAX_BIP32_PATH_DEPTH,
-    },
+    constants::{ApduError as Error, BIP32_PATH_SUFFIX_DEPTH, MAX_BIP32_PATH_DEPTH},
     dispatcher::ApduHandler,
     handlers::{
-        avax::sign_hash::Sign as SignHash,
+        avax::{sign_hash::Sign as SignHash, verify_avax_root_path},
         resources::{HASH, PATH},
     },
     parser::{DisplayableItem, ObjectList, ParserError, PathWrapper, Transaction},
@@ -84,10 +82,8 @@ impl Sign {
         // get root path
         let path_root = Self::get_derivation_info()?;
 
-        //We expect a path prefix of the form x'/x'/x'
-        if path_root.components().len() != BIP32_PATH_PREFIX_DEPTH {
-            return Err(Error::WrongLength);
-        }
+        // The root must be a canonical AVAX signing prefix (m/44'/9000'/account').
+        verify_avax_root_path(path_root)?;
 
         let mut path_wrapper: MaybeUninit<PathWrapper<BIP32_PATH_SUFFIX_DEPTH>> =
             MaybeUninit::uninit();
@@ -115,6 +111,10 @@ impl Sign {
 
             tx.disable_output_if(&address[..]);
         }
+
+        // never leave the review without a single output
+        tx.show_outputs_if_all_hidden();
+
         Ok(())
     }
 
@@ -128,11 +128,7 @@ impl Sign {
         // signing process and diseabling outputs we use it
         // to get a full path: root_path + path_suffix
         let root_path = BIP32Path::read(init_data).map_err(|_| Error::DataInvalid)?;
-
-        //We expect a path prefix of the form x'/x'/x'
-        if root_path.components().len() != BIP32_PATH_PREFIX_DEPTH {
-            return Err(Error::WrongLength);
-        }
+        verify_avax_root_path(&root_path)?;
 
         unsafe {
             crate::lock_mut!(PATH).lock(Self).replace(root_path);
@@ -213,6 +209,7 @@ impl Viewable for SignUI {
             crate::lock_mut!(PATH).lock(SignHash);
             crate::lock_mut!(HASH).lock(SignHash);
         }
+        crate::handlers::avax::sign_hash::mark_hash_approved();
 
         (tx, Error::Success as _)
     }

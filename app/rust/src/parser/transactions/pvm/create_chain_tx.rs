@@ -20,11 +20,13 @@ use nom::{
 };
 use zemu_sys::ViewError;
 
+use crate::checked_add;
 use crate::{
     handlers::handle_ui_message,
     parser::{
         cb58_output_len, nano_avax_to_fp_str, BaseTxFields, DisplayableItem, FromBytes, Header,
-        ParserError, PvmOutput, SubnetAuth, SubnetId, CB58_CHECKSUM_LEN, PVM_CREATE_CHAIN, U64_FORMATTED_SIZE
+        ParserError, PvmOutput, SubnetAuth, SubnetId, CB58_CHECKSUM_LEN, PVM_CREATE_CHAIN,
+        U64_FORMATTED_SIZE,
     },
     utils::{bs58_encode, hex_encode, ApduPanic},
 };
@@ -47,6 +49,10 @@ pub struct CreateChainTx<'b> {
 }
 
 impl<'b> CreateChainTx<'b> {
+
+    pub fn disable_output_if(&mut self, address: &[u8]) {
+        self.base_tx.disable_output_if(address);
+    }
     fn fee(&'b self) -> Result<u64, ParserError> {
         let sum_inputs = self.base_tx.sum_inputs_amount()?;
 
@@ -77,7 +83,11 @@ impl<'b> FromBytes<'b> for CreateChainTx<'b> {
 
         // base_tx
         let base_tx = unsafe { &mut *addr_of_mut!((*out).base_tx).cast() };
-        let rem = BaseTxFields::<PvmOutput>::from_bytes_into(rem, base_tx)?;
+        let rem = BaseTxFields::<PvmOutput>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_tx,
+        )?;
 
         // SubnetId
         let subnet_id = unsafe { &mut *addr_of_mut!((*out).subnet_id).cast() };
@@ -97,7 +107,12 @@ impl<'b> FromBytes<'b> for CreateChainTx<'b> {
         let vm_id = arrayref::array_ref!(vm_id, 0, VM_ID_LEN);
 
         let (rem, num_fx_id) = be_u32(rem)?;
-        let (rem, fx_id) = take(num_fx_id as usize * FX_ID_LEN)(rem)?;
+        // FX_ID_LEN is 32, so this one wraps from a smaller num_fx_id than the
+        // U32_SIZE sites do.
+        let fx_id_len = (num_fx_id as usize)
+            .checked_mul(FX_ID_LEN)
+            .ok_or(ParserError::ValueOutOfRange)?;
+        let (rem, fx_id) = take(fx_id_len)(rem)?;
 
         // This would not fail as previous line ensures we take
         // the right amount of bytes, also the alignemnt is correct
@@ -124,9 +139,15 @@ impl<'b> FromBytes<'b> for CreateChainTx<'b> {
 impl DisplayableItem for CreateChainTx<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
         // we need to show:
-        // tx description, SubnetID, ChainName, VMID, GenesisDataHash
-        // and fee
-        Ok(1 + 4 + 1)
+        // tx description, SubnetID, ChainName, VMID, GenesisDataHash,
+        // the base outputs and fee.
+        // The base outputs were previously left out of the count entirely, so
+        // where the transaction's funds went was never on screen.
+        checked_add!(
+            ViewError::Unknown,
+            1u8 + 4 + 1,
+            self.base_tx.base_outputs_num_items()?
+        )
     }
 
     fn render_item(
@@ -179,7 +200,12 @@ impl DisplayableItem for CreateChainTx<'_> {
                 hex_encode(&sha[..], &mut hex_buf).map_err(|_| ViewError::Unknown)?;
                 handle_ui_message(&hex_buf, message, page)
             }
-            5 => {
+            x if (5..5 + self.base_tx.base_outputs_num_items()?).contains(&x) => {
+                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+                self.base_tx
+                    .render_base_output_with_hrp(hrp, x - 5, title, message, page)
+            }
+            x if x == 5 + self.base_tx.base_outputs_num_items()? => {
                 let label = pic_str!(b"Fee(AVAX)");
                 title[..label.len()].copy_from_slice(label);
 
@@ -202,20 +228,22 @@ mod tests {
 
     const DATA: &[u8] = &[
         0, 0, 0, 15, 0, 0, 0, 1, 237, 95, 56, 52, 30, 67, 110, 93, 70, 226, 187, 0, 180, 93, 98,
-        174, 151, 209, 176, 80, 198, 75, 198, 52, 174, 16, 98, 103, 57, 227, 92, 75, 0, 0, 0, 1, 2,
-        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-        2, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 39, 16, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 1, 0, 0, 0, 1,
-        157, 31, 52, 188, 58, 111, 35, 6, 202, 7, 144, 22, 174, 248, 92, 19, 23, 103, 242, 56, 0,
-        0, 0, 1, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-        7, 7, 7, 7, 7, 0, 0, 0, 2, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
-        8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 31, 64, 0, 0, 0, 10, 0, 0,
-        0, 4, 0, 0, 0, 5, 0, 0, 0, 58, 0, 0, 0, 1, 0, 0, 0, 79, 0, 0, 0, 65, 0, 0, 0, 87, 0, 0, 0,
-        94, 0, 0, 0, 125, 0, 0, 1, 122, 0, 0, 0, 4, 109, 101, 109, 111, 8, 8, 8, 8, 8, 8, 8, 8, 8,
-        8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 0, 6, 122, 111, 110,
-        100, 97, 120, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-        1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-        5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 0, 0, 0, 12, 103, 101, 110, 101, 115, 105, 115, 32,
-        100, 97, 116, 97, 0, 0, 0, 10, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3,
+        174, 151, 209, 176, 80, 198, 75, 198, 52, 174, 16, 98, 103, 57, 227, 92, 75, 0, 0, 0, 1,
+        33, 230, 115, 23, 203, 196, 190, 42, 235, 0, 103, 122, 214, 70, 39, 120, 168, 245, 34, 116,
+        185, 214, 5, 223, 37, 145, 178, 48, 39, 168, 125, 255, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 39,
+        16, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 1, 0, 0, 0, 1, 157, 31, 52, 188, 58, 111, 35, 6, 202,
+        7, 144, 22, 174, 248, 92, 19, 23, 103, 242, 56, 0, 0, 0, 1, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+        7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 0, 0, 0, 2, 33, 230, 115,
+        23, 203, 196, 190, 42, 235, 0, 103, 122, 214, 70, 39, 120, 168, 245, 34, 116, 185, 214, 5,
+        223, 37, 145, 178, 48, 39, 168, 125, 255, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 31, 64, 0, 0, 0,
+        10, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0, 58, 0, 0, 0, 1, 0, 0, 0, 79, 0, 0, 0, 65, 0, 0, 0, 87,
+        0, 0, 0, 94, 0, 0, 0, 125, 0, 0, 1, 122, 0, 0, 0, 4, 109, 101, 109, 111, 33, 230, 115, 23,
+        203, 196, 190, 42, 235, 0, 103, 122, 214, 70, 39, 120, 168, 245, 34, 116, 185, 214, 5, 223,
+        37, 145, 178, 48, 39, 168, 125, 255, 0, 6, 122, 111, 110, 100, 97, 120, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1,
+        5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+        5, 5, 0, 0, 0, 12, 103, 101, 110, 101, 115, 105, 115, 32, 100, 97, 116, 97, 0, 0, 0, 10, 0,
+        0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3,
     ];
 
     #[test]

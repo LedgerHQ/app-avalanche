@@ -13,6 +13,7 @@
 *  See the License for the specific language governing permissions and
 *  limitations under the License.
 ********************************************************************************/
+use crate::checked_add;
 use crate::utils::hex_encode;
 use crate::{
     handlers::handle_ui_message,
@@ -41,6 +42,10 @@ pub struct IncreaseL1ValidatorBalanceTx<'b> {
 
 // Info at https://github.com/ava-labs/avalanchejs/blob/master/src/utils/getBurnedAmountByTx.ts
 impl<'b> IncreaseL1ValidatorBalanceTx<'b> {
+    pub fn disable_output_if(&mut self, address: &[u8]) {
+        self.base_tx.disable_output_if(address);
+    }
+
     fn fee(&'b self) -> Result<u64, ParserError> {
         let sum_inputs = self.base_tx.sum_inputs_amount()?;
 
@@ -74,7 +79,11 @@ impl<'b> FromBytes<'b> for IncreaseL1ValidatorBalanceTx<'b> {
 
         // base_tx
         let base_tx = unsafe { &mut *addr_of_mut!((*out).base_tx).cast() };
-        let rem = BaseTxFields::<PvmOutput>::from_bytes_into(rem, base_tx)?;
+        let rem = BaseTxFields::<PvmOutput>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_tx,
+        )?;
 
         // validation_id
         let (rem, validation_id) = take(32usize)(rem)?; // Read 32 bytes
@@ -94,8 +103,14 @@ impl<'b> FromBytes<'b> for IncreaseL1ValidatorBalanceTx<'b> {
 
 impl DisplayableItem for IncreaseL1ValidatorBalanceTx<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        // tx_info, validation_id, amount, fee
-        Ok(4u8)
+        // tx_info, validation_id, amount, base outputs and fee.
+        // The base outputs were previously left out of the count entirely, so
+        // where the transaction's change went was never on screen.
+        checked_add!(
+            ViewError::Unknown,
+            4u8,
+            self.base_tx.base_outputs_num_items()?
+        )
     }
 
     fn render_item(
@@ -108,6 +123,12 @@ impl DisplayableItem for IncreaseL1ValidatorBalanceTx<'_> {
         use bolos::pic_str;
 
         let mut buffer = [0; U64_FORMATTED_SIZE + 2];
+
+        const START_OUTPUTS: u8 = 3;
+        let output_items = self.base_tx.base_outputs_num_items()?;
+        let end_outputs = START_OUTPUTS
+            .checked_add(output_items)
+            .ok_or(ViewError::Unknown)?;
 
         match item_n {
             0 => {
@@ -140,7 +161,13 @@ impl DisplayableItem for IncreaseL1ValidatorBalanceTx<'_> {
 
                 handle_ui_message(balance_buff, message, page)
             }
-            3 => {
+            // render base outputs
+            x if (START_OUTPUTS..end_outputs).contains(&x) => {
+                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+                self.base_tx
+                    .render_base_output_with_hrp(hrp, x - START_OUTPUTS, title, message, page)
+            }
+            x if x == end_outputs => {
                 let label = pic_str!(b"Fee(AVAX)");
                 title[..label.len()].copy_from_slice(label);
 

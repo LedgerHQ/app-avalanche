@@ -33,20 +33,46 @@ cfg_if! {
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static EXPERT_DISABLED: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// Turn expert mode off (or back on) for the current test thread
+#[cfg(test)]
+pub fn set_expert_for_test(enabled: bool) {
+    EXPERT_DISABLED.with(|v| v.set(!enabled));
+}
+
 pub fn is_app_mode_expert() -> bool {
     cfg_if! {
         if #[cfg(not(any(unix,windows)))] {
             unsafe { app_mode_expert() }
+        } else if #[cfg(test)] {
+            !EXPERT_DISABLED.with(|v| v.get())
         } else {
            true
         }
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static BLIND_SIGN_DISABLED: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// Turn the blind-signing setting off (or back on) for the current test thread
+#[cfg(test)]
+pub fn set_blind_sign_for_test(enabled: bool) {
+    BLIND_SIGN_DISABLED.with(|v| v.set(!enabled));
+}
+
 pub fn is_app_mode_blind_sign() -> bool {
     cfg_if! {
         if #[cfg(not(any(unix,windows)))] {
             unsafe { app_mode_blindsign() }
+        } else if #[cfg(test)] {
+            !BLIND_SIGN_DISABLED.with(|v| v.get())
         } else {
            true
         }

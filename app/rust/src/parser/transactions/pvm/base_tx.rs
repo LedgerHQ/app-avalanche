@@ -24,7 +24,7 @@ use crate::{
     handlers::handle_ui_message,
     parser::{
         nano_avax_to_fp_str, BaseTxFields, DisplayableItem, FromBytes, Header, ParserError,
-        PvmOutput, MAX_ADDRESS_ENCODED_LEN, PVM_BASE_TX, PVM_BASE_TX_TRANSFER, U64_FORMATTED_SIZE,
+        PvmOutput, PVM_BASE_TX, PVM_BASE_TX_TRANSFER, U64_FORMATTED_SIZE,
     },
 };
 
@@ -58,7 +58,11 @@ impl<'b> FromBytes<'b> for PvmBaseTx<'b> {
 
         // base_fields
         let base_fields = unsafe { &mut *addr_of_mut!((*out).base).cast() };
-        rem = BaseTxFields::<PvmOutput>::from_bytes_into(rem, base_fields)?;
+        rem = BaseTxFields::<PvmOutput>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_fields,
+        )?;
 
         Ok(rem)
     }
@@ -137,44 +141,9 @@ impl<'b> PvmBaseTx<'b> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
-        let (obj, obj_item_n) = self
-            .base
-            .base_output_with_item(item_n)
-            .map_err(|_| ViewError::NoData)?;
-
-        // BaseTx only supports secp_transfer types similar to import/exports
-        let _ = obj.output.secp_transfer().ok_or(ViewError::NoData)?;
-
-        let num_inner_items = obj.output.num_inner_items()?;
-
-        match obj_item_n {
-            // For the first item (title), use PvmOutput's render_item
-            0 => obj.render_item(obj_item_n, title, message, page),
-            // For address items, handle encoding here
-            x @ 1.. if x < num_inner_items => {
-                // get the address index
-                let address_idx = x - 1;
-                let address = obj
-                    .output
-                    .get_address_at(address_idx as usize)
-                    .ok_or(ViewError::NoData)?;
-                // render encoded address with proper hrp,
-                let t = pic_str!(b"Address");
-                title[..t.len()].copy_from_slice(t);
-
-                let hrp = self.header.hrp().map_err(|_| ViewError::Unknown)?;
-                let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
-
-                let addr_len = address
-                    .encode_into(hrp, &mut encoded[..])
-                    .map_err(|_| ViewError::Unknown)?;
-
-                handle_ui_message(&encoded[..addr_len], message, page)
-            }
-            // For locked output info, use PvmOutput's render_item
-            x if x == num_inner_items => obj.render_item(obj_item_n, title, message, page),
-            _ => Err(ViewError::NoData),
-        }
+        let hrp = self.header.hrp().map_err(|_| ViewError::Unknown)?;
+        self.base
+            .render_base_output_with_hrp(hrp, item_n, title, message, page)
     }
 }
 

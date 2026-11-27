@@ -30,7 +30,8 @@
 #define WALLET_UI_MAX_SIZE 6
 
 // Use to hold the addr_ui object, used by rust to display the address
-uint8_t addr_ui_obj[WALLET_UI_MAX_SIZE] = {0};
+// File-local: see the matching note in addr.c.
+static uint8_t addr_ui_obj[WALLET_UI_MAX_SIZE] = {0};
 
 zxerr_t fill_wallet_id(uint32_t *tx, uint32_t rx, uint8_t *buffer, uint16_t buffer_len) {
     uint16_t ui = _wallet_ui_size();
@@ -58,7 +59,7 @@ zxerr_t wallet_getNumItems(uint8_t *num_items) {
     return _wallet_num_items(addr_ui_obj, num_items);
 }
 
-zxerr_t wallet_getItem(int8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen,
+zxerr_t wallet_getItem(uint8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen,
                        uint8_t pageIdx, uint8_t *pageCount) {
     return _wallet_get_item(addr_ui_obj, displayIdx, (unsigned char *)outKey, outKeyLen, (unsigned char *)outVal, outValLen,
                             pageIdx, pageCount);

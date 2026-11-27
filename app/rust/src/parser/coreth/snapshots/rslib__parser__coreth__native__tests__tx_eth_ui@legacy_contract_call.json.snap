@@ -8,6 +8,8 @@ input_file: src/parser/coreth/eth_testvectors/legacy_contract_call.json
     "Contract": "Call",
     "Transfer": "??? 14.12582170622427136",
     "To": "0xcccccccccccccccccccccccccccccccccccccccc",
-    "Contract Data: ": "0x7f7465737432000000000000000000000000000000000000000000000000...",
+    "Function": "0x7f746573",
+    "Data Length": "36 bytes",
+    "Data Hash": "0xe2e6593100533efb487df4d9f1033f85ba5eade0b1803f802bb9780221aedd72",
     "Maximun Fee(GWEI)": "100000000",
 ]

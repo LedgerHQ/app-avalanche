@@ -23,6 +23,7 @@ use crate::parser::{Address, DisplayableItem, ParserError};
 mod asset_call;
 mod contract_call;
 mod deploy;
+mod opaque_data;
 
 #[cfg(feature = "erc20")]
 mod erc20;
@@ -54,6 +55,26 @@ pub enum EthData<'b> {
 }
 
 impl<'b> EthData<'b> {
+    /// Whether this data is not shown in full on screen, so that signing it
+    /// is blind signing.
+    ///
+    /// A contract deployment and a call the app does not decode cannot be
+    /// read on the device: the review only shows their length and keccak-256
+    /// hash (and the function selector of a call), to check against the
+    /// dApp. The `bytes data` an ERC-721 `safeTransferFrom` may pass on is
+    /// not shown at all. Every other kind is decoded in full (the token and
+    /// asset-call parsers refuse trailing bytes).
+    pub fn requires_blind_signing(&self) -> bool {
+        match self {
+            Self::Deploy(_) | Self::ContractCall(_) => true,
+            Self::None | Self::AssetCall(_) => false,
+            #[cfg(feature = "erc20")]
+            Self::Erc20(_) => false,
+            #[cfg(feature = "erc721")]
+            Self::Erc721(d) => d.requires_blind_signing(),
+        }
+    }
+
     pub fn parse_into(
         to: &Option<Address<'b>>,
         input: &'b [u8],
@@ -86,12 +107,30 @@ impl<'b> EthData<'b> {
                     // a generic contract call
                     cfg_if::cfg_if! {
                         if #[cfg(all(feature = "erc721", feature = "erc20"))] {
-                            Self::parse_erc721(to, data, out)
-                                .or_else(|_| Self::parse_erc20(to, data, out))
-                                .or_else(|_| Self::parse_contract_call(data, out))?;
+                            if ERC20::is_known_token(to) {
+                                // An allow-listed ERC-20 is never an NFT
+                                // collection, whatever NFT info the host
+                                // provided: ERC-721 shares the approve and
+                                // transferFrom selectors with ERC-20
+                                Self::parse_erc20(to, data, out)
+                                    .or_else(|_| Self::parse_contract_call(data, out))?;
+                            } else if ERC721::is_unverified_shared_call(to, data) {
+                                // NFT info Ledger did not sign cannot say
+                                // whether approve/transferFrom is a token or
+                                // an NFT call: review it undecoded
+                                Self::parse_contract_call(data, out)?;
+                            } else {
+                                Self::parse_erc721(to, data, out)
+                                    .or_else(|_| Self::parse_erc20(to, data, out))
+                                    .or_else(|_| Self::parse_contract_call(data, out))?;
+                            }
                         } else if #[cfg(feature = "erc721")] {
-                            Self::parse_erc721(to, data, out)
-                                .or_else(|_| Self::parse_contract_call(data, out))?;
+                            if ERC721::is_unverified_shared_call(to, data) {
+                                Self::parse_contract_call(data, out)?;
+                            } else {
+                                Self::parse_erc721(to, data, out)
+                                    .or_else(|_| Self::parse_contract_call(data, out))?;
+                            }
                         } else if #[cfg(feature = "erc20")] {
                             Self::parse_erc20(to, data, out)
                                 .or_else(|_| Self::parse_contract_call(data, out))?;
@@ -114,10 +153,9 @@ impl<'b> EthData<'b> {
             return Err(ParserError::NoData);
         }
 
-        // read all the data as the contract deployment
-        // we do not have a way to verify this data. in the worst scenario
-        // the transaction would be rejected, and for this reason
-        // It is shown on the screen(partially) for the user to review.
+        // read all the data as the contract deployment: we have no way to
+        // decode it, so the review shows its length and hash for the user to
+        // check against the dApp (and requires blind signing).
         Self::init_as_deploy(|deploy| Deploy::parse_into(data, deploy), out)
     }
 

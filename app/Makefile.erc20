@@ -25,7 +25,6 @@ TICKER = "AVAX"
 CFLAGS += -DMAJOR_VERSION=$(APPVERSION_M) -DMINOR_VERSION=$(APPVERSION_N) -DPATCH_VERSION=$(APPVERSION_P)
 
 DEFINES += HAVE_ETH_INTEGRATION HAVE_ETH2 USE_LIB_ETHEREUM
-DEFINES += HAVE_BYPASS_SIGNATURES
 # commented out as we no longer use app-ethereum
 # for handling erc20 tokens.
 # DEFINES += HAVE_CONTRACT_NAME_IN_DESCRIPTOR
@@ -33,6 +32,7 @@ HAVE_EIP712_FULL_SUPPORT = 1
 DEFINES += HAVE_EIP712_FULL_SUPPORT=$(HAVE_EIP712_FULL_SUPPORT)
 DEFINES += HAVE_DOMAIN_NAME
 DEFINES += CHAIN_ID=$(CHAIN_ID)
+DEFINES += APP_TICKER=\"$(TICKER)\" APP_CHAIN_ID=$(CHAIN_ID) APP_COIN_TYPE=60
 DEFINES += TICKER=\"$(TICKER)\"
 DEFINES += HAVE_BOLOS_APP_STACK_CANARY HAVE_HASH3
 DEFINES += HAVE_DYN_MEM_ALLOC
@@ -46,31 +46,76 @@ DEFINES += CHAINID_COINNAME=\"$(TICKER)\" BUILD_YEAR=\"$(shell date +%Y)\"
 
 INCLUDES_PATH += $(BOLOS_SDK)/lib_cxng/src
 INCLUDES_PATH += $(BOLOS_SDK)/lib_cxng/include
-INCLUDES_PATH += $(MY_DIR)/../deps/ethereum/ethereum-plugin-sdk/src
-INCLUDES_PATH += $(MY_DIR)/../deps/ethereum/src
-INCLUDES_PATH += $(MY_DIR)/../deps/ethereum/src_features/
-INCLUDES_PATH += $(MY_DIR)/../deps/ethereum/src_plugins/
 
-ETHEREUM_SRC_DIR := $(MY_DIR)/../deps/ethereum/src
-# With the line bellow we remove app-ethereum/src/main.c file from our sources
-ETHEREUM_SRC_FILES := $(filter-out $(ETHEREUM_SRC_DIR)/main.c, $(shell find $(ETHEREUM_SRC_DIR) -name '*.c'))
+ETHEREUM_DIR := $(MY_DIR)/../deps/ethereum
+
+INCLUDES_PATH += $(ETHEREUM_DIR)/ethereum-plugin-sdk/src
+# Upstream app-ethereum collapsed src_features/, src_plugins/ and src_nbgl/
+# into a single src/ tree, with headers sitting beside their sources, so
+# every directory under src/ is an include path.
+INCLUDES_PATH += $(shell find $(ETHEREUM_DIR)/src -type d)
+
+# app-ethereum's own entry point is replaced by the avalanche one. Its
+# home/settings screen (upstream renamed src_nbgl/ui_idle.c to
+# src/nbgl/ui_home.c) is dropped just below, where the UI layer is selected.
+# main.c, app_context.c and handle_apdu.c are app-ethereum's own entry point,
+# global state and APDU dispatcher. Avalanche supplies all three itself in
+# app/src/handler.c, so compiling upstream's copies would collide.
+ETHEREUM_EXCLUDED_SRC := \
+	$(ETHEREUM_DIR)/src/main.c \
+	$(ETHEREUM_DIR)/src/app_context.c \
+	$(ETHEREUM_DIR)/src/handle_apdu.c \
+	$(shell find $(ETHEREUM_DIR)/src/features/address_book -name '*.c') \
+	$(shell find $(ETHEREUM_DIR)/src/features/sign_tx -name '*.c') \
+	$(shell find $(ETHEREUM_DIR)/src/swap -name '*.c')
+
+# Upstream is NBGL-only: it deleted src_bagl/ and renders Nano through
+# ENABLE_NBGL_FOR_NANO_DEVICES. Avalanche keeps its own BAGL UI (zxlib) on
+# Nano, so eth's NBGL layer cannot be compiled there. Of that layer only the
+# EIP-712 review screens are ever linked (see the pre-bump build maps), so
+# Nano needs BAGL implementations for ui_sign_712 / ui_sign_712_v0 only.
+ifeq ($(TARGET_NAME),$(filter $(TARGET_NAME), $(NBGL_TARGETS)))
+	# ui_icons.c pulls in the generated Ethereum network icon table. Avalanche
+	# always shows its own icon (never a plugin caller or a clone), so
+	# eth_ui_patch.c supplies the whole ui_icons.h interface instead.
+	ETHEREUM_EXCLUDED_SRC += $(ETHEREUM_DIR)/src/nbgl/ui_home.c \
+	                         $(ETHEREUM_DIR)/src/nbgl/ui_icons.c
+else
+	# Nano has far less RAM than the wallet-sized devices, and linking eth's
+	# 16 KiB default heap on top of avalanche's own state overflows .bss on
+	# Nano X. The EIP-712 review is the only consumer here, so give it a
+	# smaller budget; over-large messages then fail to allocate and report
+	# insufficient memory rather than being displayed.
+	DEFINES += SIZE_MEM_BUFFER=8192
+
+	# Nano keeps avalanche's BAGL UI, so eth's NBGL layer is dropped along with
+	# the features that only exist to feed it.
+	# ui_utils.c only allocates the shared EIP-712 pair/message buffers and is
+	# UI-stack neutral, so it stays in the build for BAGL devices too.
+	ETHEREUM_EXCLUDED_SRC += $(filter-out $(ETHEREUM_DIR)/src/nbgl/ui_utils.c, \
+	                           $(shell find $(ETHEREUM_DIR)/src/nbgl -name '*.c')) \
+	                         $(shell find $(ETHEREUM_DIR)/src/features/provide_network_info -name '*.c') \
+	                         $(shell find $(ETHEREUM_DIR)/src/features/provide_tx_simulation -name '*.c') \
+	                         $(shell find $(ETHEREUM_DIR)/src/features/provide_gating -name '*.c')
+endif
+
+ETHEREUM_SRC_FILES := $(filter-out $(ETHEREUM_EXCLUDED_SRC), $(shell find $(ETHEREUM_DIR)/src -name '*.c'))
 APP_SOURCE_PATH += $(ETHEREUM_SRC_FILES)
-APP_SOURCE_PATH += $(MY_DIR)/../deps/ethereum/src_features
-APP_SOURCE_PATH += $(MY_DIR)/../deps/ethereum/src_plugins/
-APP_SOURCE_PATH += $(MY_DIR)/../deps/ethereum/ethereum-plugin-sdk
+APP_SOURCE_PATH += $(ETHEREUM_DIR)/ethereum-plugin-sdk
 
 SDK_SOURCE_PATH += lib_u2f lib_standard_app
 
-ifeq ($(TARGET_NAME),$(filter $(TARGET_NAME), $(NBGL_TARGETS)))
-	NBGL_SRC_DIR := $(MY_DIR)/../deps/ethereum/src_nbgl
-	NBGL_SRC_FILES := $(filter-out $(NBGL_SRC_DIR)/network_icons.c, $(shell find $(NBGL_SRC_DIR) -name '*.c'))
-	NBGL_SRC_FILES := $(filter-out $(NBGL_SRC_DIR)/ui_idle.c, $(NBGL_SRC_FILES))
+# SDK libraries the upstream eth sources now depend on. These are gated in
+# the SDK's Makefile.standard_app, so without them headers such as lists.h
+# (lib_lists) are simply absent from the include path.
+ENABLE_PKI_LIBRARY = 1
+ENABLE_DYNAMIC_ALLOC = 1
+ENABLE_TLV_LIBRARY = 1
+ENABLE_LISTS_LIBRARY = 1
 
-	INCLUDES_PATH += $(MY_DIR)/../deps/ethereum/src_nbgl
-	APP_SOURCE_PATH += $(NBGL_SRC_FILES)
-else
+# BAGL defines drive the avalanche (zxlib) UI on Nano devices.
+ifneq ($(TARGET_NAME),$(filter $(TARGET_NAME), $(NBGL_TARGETS)))
 	SDK_SOURCE_PATH += lib_ux
-	APP_SOURCE_PATH += $(MY_DIR)/../deps/ethereum/src_bagl
 	DEFINES += HAVE_BAGL HAVE_UX_FLOW HAVE_GLO096
 	DEFINES += BAGL_WIDTH=128 BAGL_HEIGHT=64 HAVE_BAGL_ELLIPSIS
 	DEFINES += HAVE_BAGL_FONT_OPEN_SANS_REGULAR_11PX
@@ -81,7 +126,3 @@ endif
 LDFLAGS += -L$(BOLOS_SDK)/lib_cxng
 
 DEFINES += FEATURE_ETH=$(FEATURE_ETH)
-
-# not present in app-ethereum/master but in develop branch
-# so it could be needed once develop gets revased onto master
-# include $(CURDIR)/../deps/ethereum/makefile_conf/features.mk

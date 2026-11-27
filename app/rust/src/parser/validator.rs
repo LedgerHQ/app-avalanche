@@ -15,11 +15,11 @@
 ********************************************************************************/
 use crate::checked_add;
 use crate::handlers::handle_ui_message;
-use crate::parser::{DisplayableItem, FromBytes, NodeId, ParserError};
+use crate::parser::{timestamp_to_date, DisplayableItem, FromBytes, NodeId, ParserError};
 use crate::sys::{ViewError, PIC};
 
 use core::{mem::MaybeUninit, ptr::addr_of_mut};
-use nom::{number::complete::be_i64, sequence::tuple};
+use nom::{number::complete::be_u64, sequence::tuple};
 
 mod weight_type;
 pub use weight_type::{Stake, Weight};
@@ -30,8 +30,8 @@ use weight_type::{StakeTrait, WeightTrait};
 #[cfg_attr(test, derive(Debug))]
 pub struct Validator<'b, W = Stake> {
     pub node_id: NodeId<'b>,
-    pub start_time: i64,
-    pub endtime: i64,
+    pub start_time: u64,
+    pub endtime: u64,
     pub weight: W,
 }
 
@@ -60,7 +60,9 @@ impl<'b, W: FromBytes<'b>> FromBytes<'b> for Validator<'b, W> {
         let node_id = unsafe { &mut *addr_of_mut!((*out).node_id).cast() };
         let rem = NodeId::from_bytes_into(input, node_id)?;
 
-        let (rem, (start_time, endtime)) = tuple((be_i64, be_i64))(rem)?;
+        // Both are u64 on the wire. Read as i64, anything past i64::MAX went
+        // negative, and timestamp_to_date overflowed near i64::MIN.
+        let (rem, (start_time, endtime)) = tuple((be_u64, be_u64))(rem)?;
 
         let weight = unsafe { &mut *addr_of_mut!((*out).weight).cast() };
         let rem = W::from_bytes_into(rem, weight)?;
@@ -68,6 +70,12 @@ impl<'b, W: FromBytes<'b>> FromBytes<'b> for Validator<'b, W> {
         // check for appropiate timestamps
         if endtime <= start_time {
             return Err(ParserError::InvalidTimestamp.into());
+        }
+
+        // Both are shown as dates, so refuse what the formatter cannot
+        // represent now instead of failing to render the screen later.
+        for t in [start_time, endtime] {
+            timestamp_to_date(t).map_err(|_| ParserError::InvalidTimestamp)?;
         }
 
         unsafe {
@@ -116,5 +124,57 @@ impl<W: DisplayableItem> DisplayableItem for Validator<'_, W> {
             3 => self.weight.render_item(0, title, message, page),
             _ => Err(ViewError::NoData),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::prelude::v1::*;
+
+    fn validator(start: u64, end: u64) -> Vec<u8> {
+        let mut v = vec![0xe9; 20];
+        v.extend(start.to_be_bytes());
+        v.extend(end.to_be_bytes());
+        v.extend(1_000_000_000u64.to_be_bytes());
+        v
+    }
+
+    #[test]
+    fn validator_times_render() {
+        let data = validator(1_600_000_000, 1_602_000_000);
+        let (_, v) = Validator::<Stake>::from_bytes(&data).unwrap();
+        let mut title = [0u8; 18];
+        let mut message = [0u8; 64];
+        v.render_item(2, &mut title, &mut message, 0).unwrap();
+        assert!(message.starts_with(b"2020-10-06 16:00:00 UTC"));
+    }
+
+    #[test]
+    fn validator_times_past_date_table_are_rejected() {
+        // Times were read as i64: 1 << 63 became i64::MIN, where the old
+        // date arithmetic overflowed, and u64::MAX became -1. Now they are
+        // u64, and everything from the first second past the year table
+        // (2369-01-01) on is rejected.
+        const END_OF_TABLE: u64 = 145_732 * 86_400;
+        for (start, end) in [
+            (1_600_000_000, 1u64 << 63),
+            (1_600_000_000, u64::MAX),
+            (1u64 << 40, (1u64 << 40) + 1),
+            (1_600_000_000, END_OF_TABLE),
+        ] {
+            let data = validator(start, end);
+            assert_eq!(
+                Validator::<Stake>::from_bytes(&data).unwrap_err(),
+                ParserError::InvalidTimestamp.into(),
+                "{} .. {}",
+                start,
+                end
+            );
+        }
+
+        // the last second of the table is still a valid end time
+        let data = validator(1_600_000_000, END_OF_TABLE - 1);
+        assert!(Validator::<Stake>::from_bytes(&data).is_ok());
     }
 }

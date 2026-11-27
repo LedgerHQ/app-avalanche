@@ -7,6 +7,7 @@ input_file: src/parser/coreth/eth_testvectors/legacy_contract_deploy_no_value.js
     "Chain ID": "5",
     "Contract": "Creation",
     "Gas Limit": "3000000",
-    "Data: ": "0x1a8451e60000000000000000000000000000000000000000000000000000...",
+    "Data Length": "68 bytes",
+    "Data Hash": "0x7311240b1710b69a4c43ffefd29cf951f0d6abbda01921840642ad8052f908bc",
     "Maximum Fee(GWEI)": "1410000000",
 ]

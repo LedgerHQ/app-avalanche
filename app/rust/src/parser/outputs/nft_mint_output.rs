@@ -25,8 +25,11 @@ use crate::{
     checked_add,
     handlers::handle_ui_message,
     parser::{
-        u32_to_str, u64_to_str, Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN,
-        MAX_ADDRESSES, U64_FORMATTED_SIZE,
+        outputs::{
+            address_items, check_locktime, check_threshold, render_locktime, render_no_owner,
+        },
+        u32_to_str, Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES,
+        U64_FORMATTED_SIZE,
     },
 };
 
@@ -81,9 +84,11 @@ impl<'b> FromBytes<'b> for NFTMintOutput<'b> {
         let addresses =
             bytemuck::try_cast_slice(addresses).map_err(|_| ParserError::InvalidAddressLength)?;
 
-        if (threshold as usize > addresses.len()) || (addresses.is_empty() && threshold != 0) {
-            return Err(ParserError::InvalidThreshold.into());
-        }
+        // threshold 0 is accepted and shown, see check_threshold
+        check_threshold(threshold, addresses.len())?;
+
+        // the locktime is shown as a date
+        check_locktime(locktime)?;
 
         //good ptr and no uninit reads
         let out = out.as_mut_ptr();
@@ -101,12 +106,13 @@ impl<'b> FromBytes<'b> for NFTMintOutput<'b> {
 
 impl DisplayableItem for NFTMintOutput<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        // output-type, group_id, threshold and addresses
+        // output-type, group_id, threshold and addresses (or the "anyone can
+        // mint" screen when there is none)
         // do not show locktime if it is 0
         checked_add!(
             ViewError::Unknown,
             3u8,
-            self.addresses.len() as _,
+            address_items(self.addresses.len()),
             (self.locktime > 0) as u8
         )
     }
@@ -119,14 +125,30 @@ impl DisplayableItem for NFTMintOutput<'_> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, ViewError> {
+        // No network context at this level; callers that have one should use
+        // render_item_with_hrp so the owner address is encoded for the right
+        // network instead of with an empty prefix.
+        self.render_item_with_hrp("", item_n, title, message, page)
+    }
+}
+
+impl NFTMintOutput<'_> {
+    pub fn render_item_with_hrp(
+        &self,
+        hrp: &str,
+        item_n: u8,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
         use bolos::{pic_str, PIC};
 
         let mut buffer = [0; U64_FORMATTED_SIZE + 2];
-        let addr_item_n = self.num_items()? - self.addresses.len() as u8;
-        let render_locktime = self.locktime > 0;
+        let addr_item_n = self.num_items()? - address_items(self.addresses.len());
+        let shows_locktime = self.locktime > 0;
         // Gets the page at which this field is displayed, by summing the boolean
         // directly since it offsets the pages by 1 if present
-        let render_threshold_at = 2 + render_locktime as u8;
+        let render_threshold_at = 2 + shows_locktime as u8;
 
         match item_n {
             0 => {
@@ -143,13 +165,8 @@ impl DisplayableItem for NFTMintOutput<'_> {
 
                 handle_ui_message(buffer, message, page)
             }
-            2 if render_locktime => {
-                let title_content = pic_str!(b"Locktime");
-                title[..title_content.len()].copy_from_slice(title_content);
-                let buffer =
-                    u64_to_str(self.locktime, &mut buffer).map_err(|_| ViewError::Unknown)?;
-
-                handle_ui_message(buffer, message, page)
+            2 if shows_locktime => {
+                render_locktime(pic_str!(b"Locktime"), self.locktime, title, message, page)
             }
             x @ 2.. if x == render_threshold_at => {
                 let title_content = pic_str!(b"Threshold");
@@ -161,13 +178,22 @@ impl DisplayableItem for NFTMintOutput<'_> {
                 handle_ui_message(buffer, message, page)
             }
 
+            // Threshold 0 with no address: anyone can mint in the group with
+            // no signature.
+            x @ 3.. if x == addr_item_n && self.addresses.is_empty() => render_no_owner(
+                pic_str!(b"Address"),
+                pic_str!(b"Anyone can mint"),
+                title,
+                message,
+                page,
+            ),
             x @ 3.. if x >= addr_item_n => {
                 let idx = x - addr_item_n;
                 if let Some(data) = self.addresses.get(idx as usize) {
                     let mut addr = MaybeUninit::uninit();
                     Address::from_bytes_into(data, &mut addr).map_err(|_| ViewError::Unknown)?;
                     let addr = unsafe { addr.assume_init() };
-                    addr.render_item(0, title, message, page)
+                    addr.render_with_hrp(hrp, title, message, page)
                 } else {
                     Err(ViewError::NoData)
                 }

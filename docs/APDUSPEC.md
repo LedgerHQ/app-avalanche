@@ -49,6 +49,22 @@ The general structure of commands and responses is as follows:
 
 ## Command definition
 
+### Derivation paths
+
+Signing and key-derivation instructions accept two roots, and both are declared
+to BOLOS in the app manifest (`APPPATH` in `app/Makefile`):
+
+| Root          | Encoded `Path[0]` / `Path[1]` | Used by                                   |
+|---------------|-------------------------------|-------------------------------------------|
+| `m/44'/9000'` | `0x8000002c` / `0x80002328`   | X-chain and P-chain                       |
+| `m/44'/60'`   | `0x8000002c` / `0x8000003c`   | C-chain, and CoreEth atomic Export/Import |
+
+The app rejects anything else. A root prefix must be exactly three components
+and every one of them hardened; a full path is capped at five components
+(`HDPATH_LEN_DEFAULT`), so requests carrying six are refused even though the
+Rust parser can represent them.
+
+
 ### INS_GET_VERSION
 
 #### Command
@@ -110,13 +126,12 @@ If the ChainIDLen is 0, then the default ChainID of 32 zero bytes (P-Chain's)
 | HRP        | byte (HRPLen)     | HRP                       | ? (not used for ed25519) |
 | ChainIDLen | byte (1)          | Length of ChainID         | 0 OR 32                  |
 | ChainID    | byte (ChainIDLen) | ChainID                   | ? (not used for ed25519) |
-| PathN      | byte (1)          | Number of path components | ? (typically 4, up to 6) |
+| PathN      | byte (1)          | Number of path components | ? (typically 4, up to 5) |
 | Path[0]    | byte (4)          | Derivation Path Data      | 0x8000002c               |
-| Path[1]    | byte (4)          | Derivation Path Data      | 0x80002328               |
+| Path[1]    | byte (4)          | Derivation Path Data      | 0x80002328 or 0x8000003c |
 | Path[2]    | byte (4)          | Derivation Path Data      | ?                        |
 | Path[3]    | byte (4)          | Derivation Path Data      | ?                        |
 | Path[4]    | byte (4)          | Derivation Path Data      | ?                        |
-| Path[5]    | byte (4)          | Derivation Path Data      | ?                        |
 
 #### Response
 
@@ -146,13 +161,12 @@ If the ChainIDLen is 0, then the default ChainID of 32 zero bytes (P-Chain's)
 | HRP        | byte (HRPLen)     | HRP                       | ?                        |
 | ChainIDLen | byte (1)          | Length of ChainID         | 0 OR 32                  |
 | ChainID    | byte (ChainIDLen) | ChainID                   | ?                        |
-| PathN      | byte (1)          | Number of path components | ? (typically 4, up to 6) |
+| PathN      | byte (1)          | Number of path components | ? (typically 4, up to 5) |
 | Path[0]    | byte (4)          | Derivation Path Data      | 0x8000002c               |
-| Path[1]    | byte (4)          | Derivation Path Data      | 0x80002328               |
+| Path[1]    | byte (4)          | Derivation Path Data      | 0x80002328 or 0x8000003c |
 | Path[2]    | byte (4)          | Derivation Path Data      | ?                        |
 | Path[3]    | byte (4)          | Derivation Path Data      | ?                        |
 | Path[4]    | byte (4)          | Derivation Path Data      | ?                        |
-| Path[5]    | byte (4)          | Derivation Path Data      | ?                        |
 
 #### Response
 
@@ -187,7 +201,7 @@ The first message should contain the root path for the keys to use, as well as t
 |---------|-----------|---------------------------|------------|
 | PathN   | byte (1)  | Number of path components | 3          |
 | Path[0] | byte (4)  | Derivation Path Data      | 0x8000002c |
-| Path[1] | byte (4)  | Derivation Path Data      | 0x80002328 |
+| Path[1] | byte (4)  | Derivation Path Data      | 0x80002328 or 0x8000003c |
 | Path[2] | byte (4)  | Derivation Path Data      | 0x80000000 |
 | Hash    | byte (32) | Hash to sign              | ?          |
 
@@ -238,8 +252,12 @@ The first packet/chunk includes the root derivation path.
 |-------------|----------|---------------------------|------------|
 | PathN       | byte (1) | Number of path components | 3          |
 | Path[0]     | byte (4) | Derivation Path Data      | 0x8000002c |
-| Path[1]     | byte (4) | Derivation Path Data      | 0x80002328 |
+| Path[1]     | byte (4) | Derivation Path Data      | 0x80002328 or 0x8000003c |
 | Path[2]     | byte (4) | Derivation Path Data      | ?          |
+
+All three components must be hardened, and the coin type 0x80002328 (9000')
+or 0x8000003c (60'), for every transaction type. Anything else is refused
+(0x6A80, data invalid).
 
 ##### Add
 
@@ -263,6 +281,15 @@ Any byte after is understood to be part of the message to sign and will be parse
 | Path[0]       | byte (4) | Derivation Path Data      | ?        |
 | Path[1]       | byte (4) | Derivation Path Data      |          |
 | ...           | ...      | ...                       |          |
+
+Each change path is a two-component suffix of the root path, with any values;
+the transaction is refused if one has any other number of components.
+
+An output is only left off the review when it is a plain secp256k1 transfer
+output (not stakeable-locked) of the network's AVAX asset, with locktime 0,
+threshold 1 and a change path's address as its only address. For transfers,
+imports and exports, if that would leave no output at all on screen, every
+output is shown. C-chain exports never hide an output.
 
 ##### Last
 
@@ -309,7 +336,7 @@ The first packet/chunk includes the root derivation path.
 |-------------|----------|---------------------------|------------|
 | PathN       | byte (1) | Number of path components | 3          |
 | Path[0]     | byte (4) | Derivation Path Data      | 0x8000002c |
-| Path[1]     | byte (4) | Derivation Path Data      | 0x80002328 |
+| Path[1]     | byte (4) | Derivation Path Data      | 0x80002328 or 0x8000003c |
 | Path[2]     | byte (4) | Derivation Path Data      | ?          |
 
 ##### Add

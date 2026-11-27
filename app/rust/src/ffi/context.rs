@@ -17,9 +17,8 @@
 use bolos_common::bip32::BIP32Path;
 
 use crate::{
-    constants::BIP32_PATH_PREFIX_DEPTH,
     handlers::{
-        avax::{sign_hash::Sign as SignHash, signing::Sign},
+        avax::{sign_hash::Sign as SignHash, signing::Sign, verify_avax_root_path},
         resources::{HASH, PATH},
     },
     parser::ParserError,
@@ -64,6 +63,8 @@ pub struct parse_tx_t {
 //     EthAddr,
 // } instruction_t;
 #[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
 pub enum Instruction {
     SignAvaxTx = 0x00,
     SignEthTx,
@@ -100,6 +101,11 @@ impl TryFrom<u8> for Instruction {
 
 #[no_mangle]
 pub unsafe extern "C" fn _set_root_path(raw_path: *const u8, path_len_bytes: u16) -> u32 {
+    // This is P1_INIT of a new request, and C has just reset the buffer the
+    // parsed object borrows from: whatever review is still on screen must
+    // not re-read it, valid path or not.
+    super::forget_parsed();
+
     let path = core::slice::from_raw_parts(raw_path, path_len_bytes as usize);
     // read root path and store it in ram as during the
     // signing process and diseabling outputs we use it
@@ -107,8 +113,12 @@ pub unsafe extern "C" fn _set_root_path(raw_path: *const u8, path_len_bytes: u16
     let Ok(root_path) = BIP32Path::read(path) else {
         return ParserError::InvalidPath as u32;
     };
-    //We expect a path prefix of the form x'/x'/x'
-    if root_path.components().len() != BIP32_PATH_PREFIX_DEPTH {
+    // This is the entry the C signing flow uses, so the same root-path rules
+    // the Rust handlers apply have to hold here too: 44' purpose, a 9000' or
+    // 60' coin type, three hardened components. A depth check alone would let
+    // a foreign-coin or unhardened root through on the path that actually
+    // ships.
+    if verify_avax_root_path(&root_path).is_err() {
         return ParserError::InvalidPath as u32;
     }
 
@@ -120,6 +130,17 @@ pub unsafe extern "C" fn _set_root_path(raw_path: *const u8, path_len_bytes: u16
 
 #[no_mangle]
 pub unsafe extern "C" fn _set_tx_hash(hash: *const u8, hash_len_bytes: u16) -> u16 {
+    // This is the approval of an AVAX transaction or message review. It
+    // answers that review whatever happens next, so the parsed object is
+    // forgotten here, and there has to be one: approving a review whose
+    // object a later request failed to replace must not sign anything.
+    if !matches!(
+        super::take_parsed(),
+        Some(Instruction::SignAvaxTx | Instruction::SignAvaxMsg)
+    ) {
+        return ZxError::NoData as u16;
+    }
+
     if hash_len_bytes != Sign::SIGN_HASH_SIZE as u16 {
         return ZxError::OutOfBounds as u16;
     }
@@ -137,5 +158,7 @@ pub unsafe extern "C" fn _set_tx_hash(hash: *const u8, hash_len_bytes: u16) -> u
     // access to the path and hash resources that this handler just updated
     crate::lock_mut!(PATH).lock(SignHash);
     crate::lock_mut!(HASH).lock(SignHash);
+    // C calls this from the review's approve callback (app_sign)
+    crate::handlers::avax::sign_hash::mark_hash_approved();
     ZxError::Ok as u16
 }

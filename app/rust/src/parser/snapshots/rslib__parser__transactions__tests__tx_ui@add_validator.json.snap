@@ -1,7 +1,7 @@
 ---
-source: app/src/parser/transactions.rs
+source: src/parser/transactions.rs
 expression: reduced
-input_file: app/src/parser/testvectors/add_validator.json
+input_file: src/parser/testvectors/add_validator.json
 ---
 [
     "AddValidator": "Transaction",
@@ -18,4 +18,5 @@ input_file: app/src/parser/testvectors/add_validator.json
     "Rewards to": "fuji1kekq6vfg56qj5vxfhlwzmgyejfxsczqld3kdup",
     "Delegate fee(%)": "2",
     "Fee(AVAX)": "0",
+    "Memo": "0x00000000",
 ]

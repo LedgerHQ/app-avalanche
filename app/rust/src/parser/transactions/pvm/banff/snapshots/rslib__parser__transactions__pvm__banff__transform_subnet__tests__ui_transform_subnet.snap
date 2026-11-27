@@ -1,12 +1,12 @@
 ---
-source: app/src/parser/transactions/pvm/banff/transform_subnet.rs
+source: src/parser/transactions/pvm/banff/transform_subnet.rs
 expression: reduced
 ---
 [
     "TransformSubnet": "Transaction",
     "SubnetID": "j7sgHpXKn6y22DQdBNr5bzidt345dor9L8rL3Mxo9bt91k4ta",
     "AssetId": "2r2x62v3WxP6xs7rZhoakaTK3hxpf1L6q8bqs6FZ83dTcKFwRA",
-    "Fee(AVAX)": "0.001",
+    "Fee(AVAX)": "0",
     "Initial supply": "1000000000000",
     "Maximum supply": "10000000000000",
     "Min consumption": "1",

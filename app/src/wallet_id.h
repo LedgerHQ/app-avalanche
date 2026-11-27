@@ -30,7 +30,7 @@ zxerr_t fill_wallet_id(uint32_t *tx, uint32_t rx, uint8_t *buffer, uint16_t buff
 zxerr_t wallet_getNumItems(uint8_t *num_items);
 
 // Gets an specific item from the address view (including paging)
-zxerr_t wallet_getItem(int8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outValue, uint16_t outValueLen,
+zxerr_t wallet_getItem(uint8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outValue, uint16_t outValueLen,
                        uint8_t pageIdx, uint8_t *pageCount);
 
 #ifdef __cplusplus

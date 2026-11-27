@@ -1,4 +1,6 @@
-use crate::parser::{AddressedCall, FromBytes, NetworkId, ParserError};
+use crate::parser::{
+    proof_of_possession::BLS_SIGNATURE_LEN, AddressedCall, FromBytes, NetworkId, ParserError,
+};
 use core::mem::MaybeUninit;
 use nom::{
     bytes::complete::take,
@@ -41,11 +43,22 @@ impl<'b> FromBytes<'b> for WarpMessage<'b> {
         let source_chain_id = arrayref::array_ref!(source_chain_id, 0, 32);
 
         // payload_size (4 bytes)
-        let (rem, _) = be_u32(rem)?;
+        let (rem, payload_size) = be_u32(rem)?;
+
+        // Slice exactly the declared payload before handing it on, the same
+        // way AddressedCall bounds its own payload. Ignoring payload_size and
+        // passing the rest of the buffer let surplus bytes sit inside the warp
+        // region: AddressedCall consumed only what its own header declared,
+        // and the surplus was covered by the signing hash without ever
+        // reaching a screen.
+        let (outer_rem, payload_bytes) = take(payload_size as usize)(rem)?;
 
         // addressed_call - parse the payload as AddressedCall
         let addressed_call = unsafe { &mut *core::ptr::addr_of_mut!((*out).payload).cast() };
-        let _ = AddressedCall::from_bytes_into(rem, addressed_call)?;
+        let after_payload = AddressedCall::from_bytes_into(payload_bytes, addressed_call)?;
+        if !after_payload.is_empty() {
+            return Err(nom::Err::Error(ParserError::UnexpectedData));
+        }
 
         unsafe {
             core::ptr::addr_of_mut!((*out).codec_id).write(codec_id);
@@ -53,6 +66,25 @@ impl<'b> FromBytes<'b> for WarpMessage<'b> {
             core::ptr::addr_of_mut!((*out).source_chain_id).write(source_chain_id);
         }
 
-        Ok(&[])
+        // Callers hand this function a slice bounded to the declared warp size,
+        // so whatever is left here belongs to the warp message itself. A signed
+        // message carries a BitSetSignature -- type id, the signer bitset as a
+        // length-prefixed byte string, then the aggregate BLS signature; an
+        // unsigned one carries nothing. Neither is displayed, but both have to
+        // be walked: leaving a tail unparsed is exactly what allowed "declared
+        // size" and "bytes accounted for" to be different numbers.
+        let rem = if outer_rem.is_empty() {
+            outer_rem
+        } else {
+            let (rem, _signature_type_id) = be_u32(outer_rem)?;
+            let (rem, signers_len) = be_u32(rem)?;
+            let (rem, _signers) = take(signers_len as usize)(rem)?;
+            let (rem, _signature) = take(BLS_SIGNATURE_LEN)(rem)?;
+            rem
+        };
+
+        // Anything still here is a byte the declared size covered, the hash
+        // covers, and no screen shows.
+        Ok(rem)
     }
 }

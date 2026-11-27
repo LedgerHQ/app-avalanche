@@ -13,6 +13,7 @@
 *  See the License for the specific language governing permissions and
 *  limitations under the License.
 ********************************************************************************/
+use crate::checked_add;
 use crate::utils::hex_encode;
 use core::{mem::MaybeUninit, ptr::addr_of_mut};
 use nom::{
@@ -45,6 +46,10 @@ pub struct SetAutoRenewedValidatorConfigTx<'b> {
 }
 
 impl<'b> SetAutoRenewedValidatorConfigTx<'b> {
+    pub fn disable_output_if(&mut self, address: &[u8]) {
+        self.base_tx.disable_output_if(address);
+    }
+
     fn fee(&'b self) -> Result<u64, ParserError> {
         let sum_inputs = self.base_tx.sum_inputs_amount()?;
         let base_outputs = self.base_tx.sum_outputs_amount()?;
@@ -73,7 +78,11 @@ impl<'b> FromBytes<'b> for SetAutoRenewedValidatorConfigTx<'b> {
 
         // base_tx
         let base_tx = unsafe { &mut *addr_of_mut!((*out).base_tx).cast() };
-        let rem = BaseTxFields::<PvmOutput>::from_bytes_into(rem, base_tx)?;
+        let rem = BaseTxFields::<PvmOutput>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_tx,
+        )?;
 
         // tx_id (32 bytes — references the creation transaction)
         let (rem, tx_id) = take(TX_ID_LEN)(rem)?;
@@ -101,8 +110,14 @@ impl<'b> FromBytes<'b> for SetAutoRenewedValidatorConfigTx<'b> {
 
 impl DisplayableItem for SetAutoRenewedValidatorConfigTx<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        // tx description, tx_id, auto_compound, period, fee
-        Ok(5)
+        // tx description, tx_id, auto_compound, period, base outputs and fee.
+        // The base outputs were previously left out of the count entirely, so
+        // where the transaction's change went was never on screen.
+        checked_add!(
+            ViewError::Unknown,
+            5u8,
+            self.base_tx.base_outputs_num_items()?
+        )
     }
 
     fn render_item(
@@ -114,6 +129,12 @@ impl DisplayableItem for SetAutoRenewedValidatorConfigTx<'_> {
     ) -> Result<u8, zemu_sys::ViewError> {
         use bolos::{pic_str, PIC};
         let mut buffer = [0; U64_FORMATTED_SIZE + 2];
+
+        const START_OUTPUTS: u8 = 4;
+        let output_items = self.base_tx.base_outputs_num_items()?;
+        let end_outputs = START_OUTPUTS
+            .checked_add(output_items)
+            .ok_or(ViewError::Unknown)?;
 
         match item_n {
             0 => {
@@ -152,7 +173,13 @@ impl DisplayableItem for SetAutoRenewedValidatorConfigTx<'_> {
                     .map_err(|_| ViewError::Unknown)?;
                 handle_ui_message(period_buff, message, page)
             }
-            4 => {
+            // render base outputs
+            x if (START_OUTPUTS..end_outputs).contains(&x) => {
+                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+                self.base_tx
+                    .render_base_output_with_hrp(hrp, x - START_OUTPUTS, title, message, page)
+            }
+            x if x == end_outputs => {
                 let label = pic_str!(b"Fee(AVAX)");
                 title[..label.len()].copy_from_slice(label);
                 let fee = self.fee().map_err(|_| ViewError::Unknown)?;

@@ -8,6 +8,8 @@ input_file: src/parser/coreth/eth_testvectors/eip2930_juice_swap_orange.json
     "Contract": "Call",
     "Transfer": "??? 2000",
     "To": "0xfff1e335bccc178de27ad211c1ee4f7ab7ee6938",
-    "Contract Data: ": "0xf3a027a60000000000000000000000000000000000000000000000000000...",
+    "Function": "0xf3a027a6",
+    "Data Length": "1700 bytes",
+    "Data Hash": "0xd7b7444c373198a465fccde32b19fce7c29a855b896d70cbf3198df80597d276",
     "Maximun Fee(GWEI)": "16690440",
 ]

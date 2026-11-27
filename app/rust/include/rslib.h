@@ -69,8 +69,10 @@ zxerr_t _wallet_get_item(uint8_t *wallet_obj, uint8_t display_idx, uint8_t *out_
                          uint16_t out_len, uint8_t page_idx, uint8_t *page_count);
 
 // Set on the rust side the root path.
-// path_len is in bytes
-void _set_root_path(const uint8_t *path, uint16_t path_len);
+// path_len is in bytes.
+// Returns parser_ok, or a parser error when the path is not a valid signing
+// root. Declaring it void here is what let callers drop that result.
+parser_error_t _set_root_path(const uint8_t *path, uint16_t path_len);
 
 // Set the AVAX transaction hash, for the next step where we sign that hash with a list
 // of signers.
@@ -81,12 +83,16 @@ zxerr_t _set_tx_hash(uint8_t *hash, uint16_t hash_len_bytes);
 zxerr_t _tx_data_offset(const uint8_t *buffer, uint16_t buffer_len, uint16_t *offset);
 
 zxerr_t _get_hash(uint8_t *hash, uint16_t hash_len);
+// marks the hash stored by _parse_sign_hash_tx as approved by the user
+zxerr_t _approve_sign_hash();
 // gets the path(root_path + suffix_path?) to sign a hash
 zxerr_t _get_signing_info(uint32_t *path, uint16_t path_len, uint8_t *input, uint16_t input_len);
 
 parser_error_t _parse_sign_hash_tx(uint8_t *input, uint16_t len);
 
 void _clean_up_hash();
+
+void _clean_up_eth();
 
 // Fill buffer with wallet id computed in rust.
 zxerr_t _app_fill_wallet(uint32_t *tx, uint32_t rx, uint8_t *buffer, uint16_t buffer_len, uint8_t *wallet_ui,

@@ -36,7 +36,11 @@
 #define PATH_MAX_SIZE_ED25519 80
 
 // Use to hold the addr_ui object, used by rust to display the address
-uint8_t addr_ui_obj[ADDR_UI_MAX_SIZE] = {0};
+// File-local: wallet_id.c defines a same-named buffer of a different size,
+// and the link accepts that today only because -z muldefs keeps whichever
+// object the linker sees first. Internal linkage removes the collision
+// instead of relying on that ordering.
+static uint8_t addr_ui_obj[ADDR_UI_MAX_SIZE] = {0};
 
 zxerr_t app_fill_ed25519_address(uint8_t *buffer, uint16_t buffer_len, uint16_t *addr_len) {
     return crypto_fill_ed25519_address(buffer, buffer_len, addr_len);
@@ -68,7 +72,7 @@ zxerr_t addr_getNumItems(uint8_t *num_items) {
     return _addr_num_items(addr_ui_obj, num_items);
 }
 
-zxerr_t addr_getItem(int8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen, uint8_t pageIdx,
+zxerr_t addr_getItem(uint8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen, uint8_t pageIdx,
                      uint8_t *pageCount) {
     return _addr_get_item(addr_ui_obj, displayIdx, (uint8_t *)outKey, outKeyLen, (uint8_t *)outVal, outValLen, pageIdx,
                           pageCount);
@@ -86,7 +90,7 @@ zxerr_t addr_getNumItemsEd25519(uint8_t *num_items) {
     return zxerr_ok;
 }
 
-zxerr_t addr_getItemEd25519(int8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen,
+zxerr_t addr_getItemEd25519(uint8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen,
                             uint8_t pageIdx, uint8_t *pageCount) {
     ZEMU_LOGF(50, "[addr_getItem] %d/%d\n", displayIdx, pageIdx)
 

@@ -1,15 +1,20 @@
 ---
-source: app/src/parser/transactions.rs
+source: src/parser/transactions.rs
 expression: reduced
-input_file: app/src/parser/testvectors/x_operation.json
+input_file: src/parser/testvectors/x_operation.json
 ---
 [
     "Operation": "Transaction",
-    "Transfer": "0.000012345 AVAX to ",
+    "Transfer": "12345 units of asset 16qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9cWcm5W to ",
     "Address": "fuji1cv6yz28qvqfgah34yw3y53su39p6kzzehw5pj3",
+    "Locked until": "1970-01-01 15:05:21 UTC",
     "Op. Type:": "NFTTransferOperation",
+    "Asset": "16qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9cWcm5W",
+    "UTXO": "2qXZ7vAAFo2oL4jEi1acVe9zQ4hbZz4VCgShcSAgxCZNGq1YYm:5",
     "GroupID: ": "12345",
     "Payload: ": "0xe8bf99e698afe4bb80e4b988e4b88defbc8ce982a3e4b88de6...",
-    "Owner: ": "1cv6yz28qvqfgah34yw3y53su39p6kzzend8lmd",
-    "Fee(AVAX)": "0.123444444",
+    "Owner: ": "fuji1cv6yz28qvqfgah34yw3y53su39p6kzzehw5pj3",
+    "Locked until": "1970-01-01 15:05:21 UTC",
+    "Fee(AVAX)": "0",
+    "Memo": "0x00010203",
 ]

@@ -1,12 +1,24 @@
 ---
 source: src/parser/transactions/pvm/banff/convert_subnet_to_l1.rs
-assertion_line: 259
 expression: reduced
 ---
 [
     "ConvertSubnetToL1": "Transaction",
     "Chain ID": "0x3132333435363738212223242526272811121314151617180102030405060708",
-    "Validator": "0x000000000000000000000000000000000000dead",
-    "Fee(AVAX)": "1152921504.606846975",
+    "Manager": "0x000000000000000000000000000000000000dead",
+    "SubnetID": "SkB92YpWm4UpburLz9tEKZw2i67H3FF6YkjaU4BkFUDTG9Xm",
+    "Fee(AVAX)": "0.999999999",
     "Validator": "NodeID-2ZbTY9GatRTrfinAoYiYLcf6CvrPAUYgo",
+    "Weight": "72623859790382856",
+    "Balance (AVAX)": "1",
+    "Signer": "0xaff4acb4c5439b5d426cadf9e946d3a452f7de3414d1ad27336133211d8b90cf49fb97eebcdeeef714dc20f54ed0d4d1",
+    "Rem Addr": "fuji1g32kvaugnx4tk3z4vemc3xd2hdz92enhfvw32u",
+    "Disabler": "fuji1g32kvaugnx4tk3z4vemc3xd2hdz92enhfvw32u",
+    "Amount": "0.000000001 AVAX to ",
+    "Address": "Anyone can spend",
+    "Locked until": "1970-05-23 21:21:18 UTC",
+    "Funds locked": "0.000000001 AVAX until 1972-10-11 12:25:21 UTC",
+    "Amount": "1000000 units of asset 2Ab62uWwJw1T6VvmKD36ufsiuGZuX1pGykXAvPX1LtjTRHxwcc to ",
+    "Address": "fuji1g32kvaugnx4tk3z4vemc3xd2hdz92enhfvw32u",
+    "Funds locked": "1000000 units until 1997-10-11 04:13:30 UTC",
 ]

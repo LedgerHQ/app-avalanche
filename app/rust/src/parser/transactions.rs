@@ -28,21 +28,28 @@ mod base_tx_fields;
 mod transfer;
 mod tx_header;
 
-pub use base_export::BaseExport;
+pub use base_export::{title_export_amount, BaseExport};
 pub use base_import::BaseImport;
-pub use base_tx_fields::BaseTxFields;
+pub use base_tx_fields::{output_visibility, BaseTxFields};
 pub use transfer::Transfer;
 pub use tx_header::{Header, BLOCKCHAIN_ID_LEN};
 
 mod avm;
 mod pvm;
 
+use crate::checked_add;
+use crate::handlers::handle_ui_message;
+use crate::parser::transactions::base_tx_fields::MAX_MEMO_LEN;
 use crate::parser::{
-    DisplayableItem, ExportTx as EvmExport, ImportTx as EvmImport, EVM_IMPORT_TX,
-    PVM_BASE_TX_TRANSFER, PVM_EXPORT_TX, PVM_IMPORT_TX,
+    DisplayableItem, ExportTx as EvmExport, ImportTx as EvmImport, ObjectList, Output,
+    OutputLock, TransferableInput, TransferableOutput, EVM_IMPORT_TX, PVM_BASE_TX_TRANSFER,
+    PVM_EXPORT_TX, PVM_IMPORT_TX,
 };
+use core::ops::Deref;
+use crate::utils::hex_encode;
 pub use avm::{AvmExportTx, AvmImportTx, OperationTx};
 pub use pvm::{PvmExportTx, PvmImportTx};
+use zemu_sys::ViewError;
 
 #[cfg(feature = "create-asset")]
 pub use avm::CreateAssetTx;
@@ -176,7 +183,9 @@ impl TryFrom<(u32, NetworkInfo)> for Transaction__Type {
             #[cfg(feature = "banff")]
             PVM_ADD_AUTO_RENEWED_VALIDATOR => Transaction__Type::AutoRenewedValidator,
             #[cfg(feature = "banff")]
-            PVM_SET_AUTO_RENEWED_VALIDATOR_CONFIG => Transaction__Type::SetAutoRenewedValidatorConfig,
+            PVM_SET_AUTO_RENEWED_VALIDATOR_CONFIG => {
+                Transaction__Type::SetAutoRenewedValidatorConfig
+            }
             _ => return Err(ParserError::InvalidTransactionType),
         };
 
@@ -259,6 +268,10 @@ impl<'b> Transaction<'b> {
         }
         let rem = Self::parse(rem, this)?;
 
+        // SAFETY: parse initialized it
+        let tx = unsafe { this.assume_init_ref() };
+        tx.check_non_avax_flows()?;
+
         // The P/X/C-chain unsigned transaction wire format is
         // `CodecID + UnsignedTx`. Credentials belong to the SignedTx wrapper
         // and must not be present in the bytes that the device hashes — the
@@ -279,8 +292,11 @@ impl<'b> Transaction<'b> {
             Self::PImport(tx) => tx.disable_output_if(address),
             Self::PExport(tx) => tx.disable_output_if(address),
             Self::Transfer(tx) => tx.disable_output_if(address),
-            Self::CImport(tx) => tx.disable_output_if(address),
-            Self::CExport(tx) => tx.disable_output_if(address),
+            // CImport is deliberately absent: its outputs are EVM addresses,
+            // which are a different construction from the AVAX key hash this
+            // filter matches on, so a match can only ever be contrived. See
+            // coreth/import_tx.rs. CExport too: an export has no change, see
+            // coreth/export_tx.rs.
             Self::PBase(tx) => tx.disable_output_if(address),
             #[cfg(feature = "add-validator")]
             Self::Validator(tx) => tx.disable_output_if(address),
@@ -292,6 +308,302 @@ impl<'b> Transaction<'b> {
             Self::PermissionlessDelegator(tx) => tx.disable_output_if(address),
             #[cfg(feature = "banff")]
             Self::AutoRenewedValidator(tx) => tx.disable_output_if(address),
+            // These five render their base outputs, so they need the same
+            // change filtering as every other type that does. Without an arm
+            // here they fell through to `_ => {}`, and a change output would
+            // be shown in full on transactions that used to show no outputs
+            // at all.
+            Self::SubnetValidator(tx) => tx.disable_output_if(address),
+            Self::CreateSubnet(tx) => tx.disable_output_if(address),
+            Self::CreateChain(tx) => tx.disable_output_if(address),
+            #[cfg(feature = "banff")]
+            Self::RemoveSubnetValidator(tx) => tx.disable_output_if(address),
+            #[cfg(feature = "banff")]
+            Self::ConvertSubnetToL1(tx) => tx.disable_output_if(address),
+            // And these seven, which had the same gap: base outputs that
+            // were signed and never shown, and no arm here.
+            #[cfg(feature = "create-asset")]
+            Self::XAsset(tx) => tx.disable_output_if(address),
+            #[cfg(feature = "banff")]
+            Self::TransformSubnet(tx) => tx.disable_output_if(address),
+            #[cfg(feature = "banff")]
+            Self::RegisterL1Validator(tx) => tx.disable_output_if(address),
+            #[cfg(feature = "banff")]
+            Self::SetL1ValidatorWeight(tx) => tx.disable_output_if(address),
+            #[cfg(feature = "banff")]
+            Self::DisableL1Validator(tx) => tx.disable_output_if(address),
+            #[cfg(feature = "banff")]
+            Self::IncreaseL1ValidatorBalance(tx) => tx.disable_output_if(address),
+            #[cfg(feature = "banff")]
+            Self::SetAutoRenewedValidatorConfig(tx) => tx.disable_output_if(address),
+            // CImport and CExport are the only types without an arm; see above.
+            _ => {}
+        }
+    }
+
+    /// Refuse a transaction that burns an asset other than AVAX.
+    ///
+    /// Inputs are not reviewed and the fee only counts AVAX, so for any other
+    /// asset what the transaction consumes must be exactly what it produces:
+    /// avalanchego burns any excess, and 1e12 units of a token spent into a
+    /// transaction with only AVAX outputs reviewed like a plain AVAX transfer.
+    /// The one legitimate burn, TransformSubnet's reward pool, is allowed.
+    /// Only checked where the network's AVAX asset id is known.
+    fn check_non_avax_flows(&self) -> Result<(), ParserError> {
+        let Some(avax) = self.avax_asset_id() else {
+            return Ok(());
+        };
+
+        let mut result = Ok(());
+        self.visit_flows(&mut |_, asset, _| {
+            if result.is_err() || asset == *avax {
+                return;
+            }
+
+            // consumed and produced amounts of this asset, over every list
+            let (mut consumed, mut produced) = (0u128, 0u128);
+            self.visit_flows(&mut |is_input, other, amount| {
+                if other == asset {
+                    if is_input {
+                        consumed += amount as u128;
+                    } else {
+                        produced += amount as u128;
+                    }
+                }
+            });
+
+            #[cfg(feature = "banff")]
+            if let Self::TransformSubnet(tx) = self {
+                let (reward_asset, burn) = tx.reward_burn();
+                if *reward_asset == asset {
+                    produced += burn as u128;
+                }
+            }
+
+            if consumed != produced {
+                result = Err(ParserError::UnexpectedType);
+            }
+        });
+        result
+    }
+
+    // the AVAX asset id on the transaction's network, if known
+    fn avax_asset_id(&self) -> Option<&'static [u8; 32]> {
+        match self {
+            Self::XImport(tx) => tx.0.base_tx.avax_asset_id(),
+            Self::XExport(tx) => tx.0.base_tx.avax_asset_id(),
+            Self::XOperation(tx) => tx.base_tx.avax_asset_id(),
+            Self::PImport(tx) => tx.0.base_tx.avax_asset_id(),
+            Self::PExport(tx) => tx.0.base_tx.avax_asset_id(),
+            Self::CImport(tx) => tx.tx_header.avax_asset_id(),
+            Self::CExport(tx) => tx.tx_header.avax_asset_id(),
+            Self::Transfer(tx) => tx.base.avax_asset_id(),
+            Self::PBase(tx) => tx.base.avax_asset_id(),
+            #[cfg(feature = "create-asset")]
+            Self::XAsset(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "add-validator")]
+            Self::Validator(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "add-delegator")]
+            Self::Delegator(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "create-chain")]
+            Self::CreateChain(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "create-subnet")]
+            Self::CreateSubnet(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "add-subnet-validator")]
+            Self::SubnetValidator(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::RemoveSubnetValidator(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::TransformSubnet(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::PermissionlessValidator(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::PermissionlessDelegator(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::ConvertSubnetToL1(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::RegisterL1Validator(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::SetL1ValidatorWeight(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::DisableL1Validator(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::IncreaseL1ValidatorBalance(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::AutoRenewedValidator(tx) => tx.base_tx.avax_asset_id(),
+            #[cfg(feature = "banff")]
+            Self::SetAutoRenewedValidatorConfig(tx) => tx.base_tx.avax_asset_id(),
+        }
+    }
+
+    /// Call `f(is_input, asset, amount)` for every fungible input and output
+    /// of the transaction: base inputs and outputs, and the imported, exported
+    /// and stake lists where the type has them. NFT and mint outputs carry no
+    /// amount and are skipped.
+    ///
+    /// `f` is generic rather than a `&mut dyn FnMut`: a trait object's
+    /// vtable holds absolute link-time function addresses that nothing
+    /// relocates (ROPI only makes code-relative accesses position
+    /// independent), so calling through it on the device jumps outside the
+    /// app and crashes it.
+    fn visit_flows<F: FnMut(bool, [u8; 32], u64)>(&self, f: &mut F) {
+        fn ins<F: FnMut(bool, [u8; 32], u64)>(
+            list: &ObjectList<'_, TransferableInput<'_>>,
+            f: &mut F,
+        ) {
+            list.iterate_with(|i| {
+                if let Some(amount) = i.amount() {
+                    f(true, *i.asset_id().id(), amount)
+                }
+            });
+        }
+        fn outs<'b, O, F>(list: &ObjectList<'b, TransferableOutput<'b, O>>, f: &mut F)
+        where
+            O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
+            F: FnMut(bool, [u8; 32], u64),
+        {
+            list.iterate_with(|o| {
+                if let Some(amount) = o.amount() {
+                    f(false, *o.asset_id().id(), amount)
+                }
+            });
+        }
+        fn base<'b, O, F>(base: &BaseTxFields<'b, O>, f: &mut F)
+        where
+            O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
+            F: FnMut(bool, [u8; 32], u64),
+        {
+            ins(&base.inputs, f);
+            outs(&base.outputs, f);
+        }
+
+        match self {
+            Self::XImport(tx) => {
+                base(&tx.0.base_tx, f);
+                ins(&tx.0.inputs, f);
+            }
+            Self::XExport(tx) => {
+                base(&tx.0.base_tx, f);
+                outs(&tx.0.outputs, f);
+            }
+            Self::XOperation(tx) => base(&tx.base_tx, f),
+            Self::PImport(tx) => {
+                base(&tx.0.base_tx, f);
+                ins(&tx.0.inputs, f);
+            }
+            Self::PExport(tx) => {
+                base(&tx.0.base_tx, f);
+                outs(&tx.0.outputs, f);
+            }
+            Self::CImport(tx) => {
+                ins(&tx.inputs, f);
+                tx.outputs.iterate_with(|o| {
+                    if let Some(amount) = o.amount() {
+                        f(false, *o.asset_id().id(), amount)
+                    }
+                });
+            }
+            Self::CExport(tx) => {
+                tx.inputs.iterate_with(|i| {
+                    if let Some(amount) = i.amount() {
+                        f(true, *i.asset_id().id(), amount)
+                    }
+                });
+                outs(&tx.outputs, f);
+            }
+            Self::Transfer(tx) => base(&tx.base, f),
+            Self::PBase(tx) => base(&tx.base, f),
+            #[cfg(feature = "create-asset")]
+            Self::XAsset(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "add-validator")]
+            Self::Validator(tx) => {
+                base(&tx.base_tx, f);
+                outs(&tx.stake, f);
+            }
+            #[cfg(feature = "add-delegator")]
+            Self::Delegator(tx) => {
+                base(&tx.base_tx, f);
+                outs(&tx.stake, f);
+            }
+            #[cfg(feature = "create-chain")]
+            Self::CreateChain(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "create-subnet")]
+            Self::CreateSubnet(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "add-subnet-validator")]
+            Self::SubnetValidator(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "banff")]
+            Self::RemoveSubnetValidator(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "banff")]
+            Self::TransformSubnet(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "banff")]
+            Self::PermissionlessValidator(tx) => {
+                base(&tx.base_tx, f);
+                outs(&tx.stake, f);
+            }
+            #[cfg(feature = "banff")]
+            Self::PermissionlessDelegator(tx) => {
+                base(&tx.base_tx, f);
+                outs(&tx.stake, f);
+            }
+            #[cfg(feature = "banff")]
+            Self::ConvertSubnetToL1(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "banff")]
+            Self::RegisterL1Validator(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "banff")]
+            Self::SetL1ValidatorWeight(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "banff")]
+            Self::DisableL1Validator(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "banff")]
+            Self::IncreaseL1ValidatorBalance(tx) => base(&tx.base_tx, f),
+            #[cfg(feature = "banff")]
+            Self::AutoRenewedValidator(tx) => {
+                base(&tx.base_tx, f);
+                outs(&tx.stake, f);
+            }
+            #[cfg(feature = "banff")]
+            Self::SetAutoRenewedValidatorConfig(tx) => base(&tx.base_tx, f),
+        }
+    }
+
+    /// Run after the change filter has been applied for every change path:
+    /// if it hid every output of a transfer, show them all again.
+    ///
+    /// A transfer, import or export whose outputs all go back to the user's
+    /// own paths would otherwise review with no output at all, and nothing
+    /// would tell the user where the funds went. Staking, subnet, L1 and
+    /// operation transactions are left alone: their purpose is on screen
+    /// anyway, and an honest delegation, whose change and stake both return
+    /// to the user, would otherwise always show every output.
+    pub fn show_outputs_if_all_hidden(&mut self) {
+        let (visible, total) = self.output_visibility();
+        if total > 0 && visible == 0 {
+            self.show_all_outputs();
+        }
+    }
+
+    // (visible, total) outputs of the transfer types the rule above applies
+    // to, (0, 0) for every other type
+    fn output_visibility(&self) -> (usize, usize) {
+        match self {
+            Self::Transfer(tx) => tx.base.output_visibility(),
+            Self::PBase(tx) => tx.base.output_visibility(),
+            Self::XImport(tx) => tx.0.base_tx.output_visibility(),
+            Self::PImport(tx) => tx.0.base_tx.output_visibility(),
+            Self::XExport(tx) => tx.0.output_visibility(),
+            Self::PExport(tx) => tx.0.output_visibility(),
+            // CImport and CExport are not filtered at all
+            _ => (0, 0),
+        }
+    }
+
+    fn show_all_outputs(&mut self) {
+        match self {
+            Self::Transfer(tx) => tx.base.show_all_outputs(),
+            Self::PBase(tx) => tx.base.show_all_outputs(),
+            Self::XImport(tx) => tx.0.base_tx.show_all_outputs(),
+            Self::PImport(tx) => tx.0.base_tx.show_all_outputs(),
+            Self::XExport(tx) => tx.0.show_all_outputs(),
+            Self::PExport(tx) => tx.0.show_all_outputs(),
             _ => {}
         }
     }
@@ -405,12 +717,10 @@ impl<'b> Transaction<'b> {
                 )
             }
             #[cfg(feature = "banff")]
-            Transaction__Type::AutoRenewedValidator => {
-                Self::init_as_auto_renewed_validator(
-                    |out| AddAutoRenewedValidatorTx::from_bytes_into(input, out),
-                    out,
-                )
-            }
+            Transaction__Type::AutoRenewedValidator => Self::init_as_auto_renewed_validator(
+                |out| AddAutoRenewedValidatorTx::from_bytes_into(input, out),
+                out,
+            ),
             #[cfg(feature = "banff")]
             Transaction__Type::SetAutoRenewedValidatorConfig => {
                 Self::init_as_set_auto_renewed_validator_config(
@@ -427,8 +737,8 @@ impl<'b> Transaction<'b> {
     }
 }
 
-impl DisplayableItem for Transaction<'_> {
-    fn num_items(&self) -> Result<u8, zemu_sys::ViewError> {
+impl Transaction<'_> {
+    fn inner_num_items(&self) -> Result<u8, zemu_sys::ViewError> {
         match self {
             Self::XImport(tx) => tx.num_items(),
             Self::XExport(tx) => tx.num_items(),
@@ -476,7 +786,7 @@ impl DisplayableItem for Transaction<'_> {
         }
     }
 
-    fn render_item(
+    fn render_inner_item(
         &self,
         item_n: u8,
         title: &mut [u8],
@@ -528,6 +838,122 @@ impl DisplayableItem for Transaction<'_> {
             #[cfg(feature = "banff")]
             Self::SetAutoRenewedValidatorConfig(tx) => tx.render_item(item_n, title, message, page),
         }
+    }
+
+    /// The transaction's memo, when the type carries one.
+    ///
+    /// The field is parsed and covered by the signing hash but had no render
+    /// site anywhere in the crate, so up to 256 bytes were signed without ever
+    /// being shown. Coreth transactions have no memo field.
+    fn memo(&self) -> Option<&[u8]> {
+        match self {
+            Self::XImport(tx) => Some(tx.0.base_tx.memo),
+            Self::XExport(tx) => Some(tx.0.base_tx.memo),
+            Self::XOperation(tx) => Some(tx.base_tx.memo),
+            Self::PImport(tx) => Some(tx.0.base_tx.memo),
+            Self::PExport(tx) => Some(tx.0.base_tx.memo),
+            Self::CImport(_) => None,
+            Self::CExport(_) => None,
+            Self::Transfer(tx) => Some(tx.base.memo),
+            Self::PBase(tx) => Some(tx.base.memo),
+            #[cfg(feature = "create-asset")]
+            Self::XAsset(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "add-validator")]
+            Self::Validator(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "add-subnet-validator")]
+            Self::SubnetValidator(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "add-delegator")]
+            Self::Delegator(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "create-chain")]
+            Self::CreateChain(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "create-subnet")]
+            Self::CreateSubnet(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::RemoveSubnetValidator(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::TransformSubnet(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::PermissionlessValidator(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::PermissionlessDelegator(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::ConvertSubnetToL1(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::IncreaseL1ValidatorBalance(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::DisableL1Validator(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::SetL1ValidatorWeight(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::RegisterL1Validator(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::AutoRenewedValidator(tx) => Some(tx.base_tx.memo),
+            #[cfg(feature = "banff")]
+            Self::SetAutoRenewedValidatorConfig(tx) => Some(tx.base_tx.memo),
+        }
+    }
+
+    fn memo_items(&self) -> u8 {
+        match self.memo() {
+            Some(memo) if !memo.is_empty() => 1,
+            _ => 0,
+        }
+    }
+
+    fn render_memo(
+        &self,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, zemu_sys::ViewError> {
+        use bolos::{pic_str, PIC};
+
+        let memo = self.memo().ok_or(ViewError::NoData)?;
+
+        let label = pic_str!(b"Memo");
+        title[..label.len()].copy_from_slice(label);
+
+        // Memos are arbitrary host bytes. Printable ASCII goes through as text;
+        // anything else is hex so control characters and bidi overrides cannot
+        // reach the screen. Hex is prefixed with 0x, and a text memo that
+        // itself starts with "0x" is shown as hex too: otherwise the text
+        // "00010203" and the bytes 00 01 02 03 looked the same.
+        let printable = memo.iter().all(|c| (0x20..0x7f).contains(c));
+        if printable && !memo.starts_with(b"0x") {
+            handle_ui_message(memo, message, page)
+        } else {
+            let prefix = pic_str!(b"0x"!);
+            let mut hex = [0; MAX_MEMO_LEN * 2 + 2];
+            hex[..prefix.len()].copy_from_slice(&prefix[..]);
+            let len = hex_encode(memo, &mut hex[prefix.len()..]).map_err(|_| ViewError::Unknown)?;
+            handle_ui_message(&hex[..prefix.len() + len], message, page)
+        }
+    }
+}
+
+impl DisplayableItem for Transaction<'_> {
+    fn num_items(&self) -> Result<u8, zemu_sys::ViewError> {
+        // The memo is a transaction-level field, so it is counted here rather
+        // than in each of the twenty-two types that carry BaseTxFields.
+        checked_add!(
+            ViewError::Unknown,
+            self.inner_num_items()?,
+            self.memo_items()
+        )
+    }
+
+    fn render_item(
+        &self,
+        item_n: u8,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, zemu_sys::ViewError> {
+        let inner = self.inner_num_items()?;
+        if self.memo_items() == 1 && item_n == inner {
+            return self.render_memo(title, message, page);
+        }
+        self.render_inner_item(item_n, title, message, page)
     }
 }
 
@@ -641,5 +1067,131 @@ mod tests {
 
             unsafe { with_leaked(input, test) };
         });
+    }
+
+    /// Every address of every base output `tx` signs, encoded with `hrp`.
+    /// Coreth transactions carry no BaseTxFields.
+    #[cfg(feature = "full")]
+    fn base_output_addresses(tx: &Transaction<'_>, hrp: &str) -> Vec<String> {
+        use crate::parser::{BaseTxFields, FromBytes, Output, OutputLock, MAX_ADDRESS_ENCODED_LEN};
+        use core::ops::Deref;
+
+        fn collect<'b, O>(base: &BaseTxFields<'b, O>, hrp: &str, out: &mut Vec<String>)
+        where
+            O: FromBytes<'b> + DisplayableItem + Deref<Target = Output<'b>> + OutputLock + 'b,
+        {
+            base.outputs.iterate_with(|o| {
+                let inner: &Output<'_> = &o.output;
+                for idx in 0..inner.num_addresses() {
+                    let address = inner.get_address(idx).expect("address in range");
+                    let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
+                    let len = address
+                        .encode_into(hrp, &mut encoded[..])
+                        .expect("encodable address");
+                    out.push(String::from_utf8(encoded[..len].to_vec()).expect("bech32 is ascii"));
+                }
+            });
+        }
+
+        let mut out = Vec::new();
+        // No wildcard: a new transaction type must be added here explicitly.
+        match tx {
+            Transaction::XImport(tx) => collect(&tx.0.base_tx, hrp, &mut out),
+            Transaction::XExport(tx) => collect(&tx.0.base_tx, hrp, &mut out),
+            Transaction::PExport(tx) => collect(&tx.0.base_tx, hrp, &mut out),
+            Transaction::XOperation(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::PBase(tx) => collect(&tx.base, hrp, &mut out),
+            Transaction::PImport(tx) => collect(&tx.0.base_tx, hrp, &mut out),
+            Transaction::CImport(_) | Transaction::CExport(_) => {}
+            Transaction::Transfer(tx) => collect(&tx.base, hrp, &mut out),
+            Transaction::XAsset(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::Validator(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::Delegator(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::CreateChain(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::CreateSubnet(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::SubnetValidator(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::RemoveSubnetValidator(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::TransformSubnet(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::PermissionlessValidator(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::PermissionlessDelegator(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::ConvertSubnetToL1(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::RegisterL1Validator(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::SetL1ValidatorWeight(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::DisableL1Validator(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::IncreaseL1ValidatorBalance(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::AutoRenewedValidator(tx) => collect(&tx.base_tx, hrp, &mut out),
+            Transaction::SetAutoRenewedValidatorConfig(tx) => collect(&tx.base_tx, hrp, &mut out),
+        }
+        out
+    }
+
+    /// A base output the device signs must be on screen. The fee is
+    /// sum(inputs) - sum(outputs), so it only depends on amounts: an output
+    /// whose address is never rendered can be redirected with nothing on the
+    /// review to show for it.
+    ///
+    /// Walks every vector, renders every page, and checks each base-output
+    /// address appears -- with no change filter, and with one that matches
+    /// none of the outputs (so nothing may be hidden).
+    #[test]
+    #[cfg(feature = "full")]
+    #[cfg_attr(miri, ignore)]
+    fn every_base_output_is_rendered() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/parser/testvectors");
+        let mut paths = std::fs::read_dir(&dir)
+            .expect("testvectors dir")
+            .map(|entry| entry.expect("dir entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .collect::<Vec<_>>();
+        paths.sort();
+        assert!(!paths.is_empty(), "no vectors found in {:?}", dir);
+
+        for path in paths {
+            let file = std::fs::File::open(&path).expect("open vector");
+            let data: Vec<u8> = serde_json::from_reader(file).expect("vector is a byte array");
+
+            for change_filter in [None, Some([0xa5u8; 20])] {
+                let mut tx = Transaction::new(&data)
+                    .unwrap_or_else(|e| panic!("{:?} does not parse: {:?}", path, e));
+                if let Some(change) = change_filter {
+                    tx.disable_output_if(&change);
+                }
+
+                // codec (2 bytes) and type id (4 bytes), then the network id
+                let network_id = u32::from_be_bytes([data[6], data[7], data[8], data[9]]);
+                let hrp = crate::parser::NetworkId::try_from(network_id)
+                    .expect("valid network id")
+                    .hrp();
+
+                let mut screens = Vec::<String>::new();
+                let items = DisplayableItem::num_items(&tx).expect("num_items");
+                for item in 0..items {
+                    let mut title = [0u8; 18];
+                    let mut message = [0u8; 1024];
+                    let pages = DisplayableItem::render_item(&tx, item, &mut title, &mut message, 0)
+                        .unwrap_or_else(|e| panic!("{:?}: item {} failed: {:?}", path, item, e));
+
+                    let mut text = String::new();
+                    for page in 0..pages {
+                        message.fill(0);
+                        DisplayableItem::render_item(&tx, item, &mut title, &mut message, page)
+                            .expect("page renders");
+                        let end = message.iter().position(|&b| b == 0).unwrap_or(message.len());
+                        text.push_str(core::str::from_utf8(&message[..end]).expect("ascii"));
+                    }
+                    screens.push(text);
+                }
+
+                for address in base_output_addresses(&tx, hrp) {
+                    assert!(
+                        screens.contains(&address),
+                        "{:?}: base output address {} is signed but never shown (change filter: {:?})",
+                        path,
+                        address,
+                        change_filter
+                    );
+                }
+            }
+        }
     }
 }

@@ -18,7 +18,7 @@
 //
 mod path_wrapper;
 mod time;
-pub use self::time::timestamp_to_str_date;
+pub use self::time::{timestamp_to_date, timestamp_to_str_date};
 pub use path_wrapper::{parse_path_list, PathWrapper};
 
 use crate::parser::{ParserError, CB58_CHECKSUM_LEN, NANO_AVAX_DECIMAL_DIGITS, U64_FORMATTED_SIZE, U32_FORMATTED_SIZE, U8_FORMATTED_SIZE};

@@ -21,14 +21,14 @@ use crate::checked_add;
 use crate::handlers::handle_ui_message;
 use crate::parser::{
     nano_avax_to_fp_str, AvmOutput, BaseTxFields, DisplayableItem, FromBytes, Header, ParserError,
-    MAX_ADDRESS_ENCODED_LEN, TRANSFER_TX, U64_FORMATTED_SIZE
+    TRANSFER_TX, U64_FORMATTED_SIZE,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, derive(Debug))]
 pub struct Transfer<'b> {
     header: Header<'b>,
-    base: BaseTxFields<'b, AvmOutput<'b>>,
+    pub base: BaseTxFields<'b, AvmOutput<'b>>,
 }
 
 impl Transfer<'_> {
@@ -50,51 +50,18 @@ impl Transfer<'_> {
             .base_output_with_item(item_n)
             .map_err(|_| ViewError::NoData)?;
 
-        // this is a secp_transfer so it contain
-        // 1 item amount
-        // x items which is one item for each address
-        let num_inner_items = obj.num_items()?;
+        let hrp = self.header.hrp().map_err(|_| ViewError::Unknown)?;
+        let avax = self.base.avax_asset_id();
+        let res = obj.render_item_with_hrp(hrp, avax, idx, title, message, page);
 
-        match idx {
-            0 => {
-                // render using default obj impl
-                let res = obj.render_item(0, title, message, page);
-
-                title.iter_mut().for_each(|v| *v = 0);
-
-                // customize the label
-                let label = pic_str!(b"Transfer");
-                title[..label.len()].copy_from_slice(label);
-
-                res
-            }
-
-            x @ 1.. if x < num_inner_items => {
-                let addr_idx = x - 1;
-                // Transfer only supports secp_transfer outputs
-                // Unwrap is safe as we check outputs while parsing
-                let obj = obj.secp_transfer().unwrap();
-
-                let address = obj
-                    .get_address_at(addr_idx as usize)
-                    .ok_or(ViewError::NoData)?;
-
-                // render encoded address with proper hrp,
-                let t = pic_str!(b"Address");
-                title[..t.len()].copy_from_slice(t);
-
-                let hrp = self.header.hrp().map_err(|_| ViewError::Unknown)?;
-                let mut encoded = [0; MAX_ADDRESS_ENCODED_LEN];
-
-                let addr_len = address
-                    .encode_into(hrp, &mut encoded[..])
-                    .map_err(|_| ViewError::Unknown)?;
-
-                handle_ui_message(&encoded[..addr_len], message, page)
-            }
-
-            _ => Err(ViewError::NoData),
+        // customize the label of the amount
+        if idx == 0 {
+            title.iter_mut().for_each(|v| *v = 0);
+            let label = pic_str!(b"Transfer");
+            title[..label.len()].copy_from_slice(label);
         }
+
+        res
     }
 
     fn fee(&self) -> Result<u64, ParserError> {
@@ -123,7 +90,11 @@ impl<'b> FromBytes<'b> for Transfer<'b> {
 
         // base_tx
         let base_tx = unsafe { &mut *addr_of_mut!((*out).base).cast() };
-        let rem = BaseTxFields::<AvmOutput>::from_bytes_into(rem, base_tx)?;
+        let rem = BaseTxFields::<AvmOutput>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_tx,
+        )?;
         let base = unsafe { base_tx.assume_init_ref() };
         // filter outputs, the only one allow is secp_transfers
         if base

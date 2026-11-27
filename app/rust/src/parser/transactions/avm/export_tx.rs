@@ -23,13 +23,13 @@ use crate::{
     handlers::handle_ui_message,
     parser::{
         nano_avax_to_fp_str, AvmOutput, BaseExport, DisplayableItem, FromBytes, ParserError,
-        AVM_EXPORT_TX, U64_FORMATTED_SIZE
+        AVM_EXPORT_TX, U64_FORMATTED_SIZE,
     },
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, derive(Debug))]
-pub struct AvmExportTx<'b>(BaseExport<'b, AvmOutput<'b>>);
+pub struct AvmExportTx<'b>(pub BaseExport<'b, AvmOutput<'b>>);
 
 impl<'b> FromBytes<'b> for AvmExportTx<'b> {
     #[inline(never)]
@@ -56,8 +56,15 @@ impl DisplayableItem for AvmExportTx<'_> {
         // only support SECP256k1 outputs
         // and to keep compatibility with the legacy app,
         // we show only 4 items for each output
-        // chains info, amount, address and fee which is the sum of all inputs minus all outputs
-        checked_add!(ViewError::Unknown, 2u8, self.0.num_outputs_items()?)
+        // chains info, amount, address and fee which is the sum of all inputs minus all outputs.
+        // The base (change) outputs follow the exported ones; they were previously
+        // left out of the count entirely, so where the change went was never on screen.
+        checked_add!(
+            ViewError::Unknown,
+            2u8,
+            self.0.num_outputs_items()?,
+            self.0.base_tx.base_outputs_num_items()?
+        )
     }
 
     fn render_item(
@@ -75,11 +82,25 @@ impl DisplayableItem for AvmExportTx<'_> {
         }
 
         let outputs_num_items = self.0.num_outputs_items()?;
+        let end_base_outputs = outputs_num_items
+            .checked_add(self.0.base_tx.base_outputs_num_items()?)
+            .ok_or(ViewError::Unknown)?;
         let new_item_n = item_n - 1;
 
         match new_item_n {
             x @ 0.. if x < outputs_num_items => self.0.render_outputs(x, title, message, page),
-            x if x == outputs_num_items => {
+            // render base (change) outputs
+            x if (outputs_num_items..end_base_outputs).contains(&x) => {
+                let hrp = self.0.chain_hrp().map_err(|_| ViewError::Unknown)?;
+                self.0.base_tx.render_base_output_with_hrp(
+                    hrp,
+                    x - outputs_num_items,
+                    title,
+                    message,
+                    page,
+                )
+            }
+            x if x == end_base_outputs => {
                 let title_content = pic_str!(b"Fee(AVAX)");
                 title[..title_content.len()].copy_from_slice(title_content);
                 let mut buffer = [0; U64_FORMATTED_SIZE + 2];
@@ -110,20 +131,22 @@ mod tests {
 
     const DATA: &[u8] = &[
         0, 0, 0, 4, 0, 0, 0, 1, 237, 95, 56, 52, 30, 67, 110, 93, 70, 226, 187, 0, 180, 93, 98,
-        174, 151, 209, 176, 80, 198, 75, 198, 52, 174, 16, 98, 103, 57, 227, 92, 75, 0, 0, 0, 1, 2,
-        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-        2, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 25, 100, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 1, 0, 0, 0, 1,
-        157, 31, 52, 188, 58, 111, 35, 6, 202, 7, 144, 22, 174, 248, 92, 19, 23, 103, 242, 56, 0,
-        0, 0, 1, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-        7, 7, 7, 7, 7, 0, 0, 0, 2, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
-        8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 31, 64, 0, 0, 0, 10, 0, 0,
-        0, 4, 0, 0, 0, 5, 0, 0, 0, 58, 0, 0, 0, 1, 0, 0, 0, 79, 0, 0, 0, 65, 0, 0, 0, 87, 0, 0, 0,
-        94, 0, 0, 0, 125, 0, 0, 1, 122, 0, 0, 0, 4, 109, 101, 109, 111, 4, 39, 212, 178, 42, 42,
-        120, 188, 221, 212, 86, 116, 44, 175, 145, 181, 107, 173, 191, 249, 133, 238, 25, 174, 241,
-        69, 115, 231, 52, 63, 214, 82, 0, 0, 0, 1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-        3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 1, 244, 0, 0,
-        0, 0, 0, 0, 0, 12, 0, 0, 0, 1, 0, 0, 0, 1, 157, 31, 52, 188, 58, 111, 35, 6, 202, 7, 144,
-        22, 174, 248, 92, 19, 23, 103, 242, 56,
+        174, 151, 209, 176, 80, 198, 75, 198, 52, 174, 16, 98, 103, 57, 227, 92, 75, 0, 0, 0, 1,
+        33, 230, 115, 23, 203, 196, 190, 42, 235, 0, 103, 122, 214, 70, 39, 120, 168, 245, 34, 116,
+        185, 214, 5, 223, 37, 145, 178, 48, 39, 168, 125, 255, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 25,
+        100, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 1, 0, 0, 0, 1, 157, 31, 52, 188, 58, 111, 35, 6,
+        202, 7, 144, 22, 174, 248, 92, 19, 23, 103, 242, 56, 0, 0, 0, 1, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+        7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 0, 0, 0, 2, 33, 230,
+        115, 23, 203, 196, 190, 42, 235, 0, 103, 122, 214, 70, 39, 120, 168, 245, 34, 116, 185,
+        214, 5, 223, 37, 145, 178, 48, 39, 168, 125, 255, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 31, 64, 0,
+        0, 0, 10, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0, 58, 0, 0, 0, 1, 0, 0, 0, 79, 0, 0, 0, 65, 0, 0,
+        0, 87, 0, 0, 0, 94, 0, 0, 0, 125, 0, 0, 1, 122, 0, 0, 0, 4, 109, 101, 109, 111, 4, 39, 212,
+        178, 42, 42, 120, 188, 221, 212, 86, 116, 44, 175, 145, 181, 107, 173, 191, 249, 133, 238,
+        25, 174, 241, 69, 115, 231, 52, 63, 214, 82, 0, 0, 0, 1, 33, 230, 115, 23, 203, 196, 190,
+        42, 235, 0, 103, 122, 214, 70, 39, 120, 168, 245, 34, 116, 185, 214, 5, 223, 37, 145, 178,
+        48, 39, 168, 125, 255, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 1, 244, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0,
+        0, 1, 0, 0, 0, 1, 157, 31, 52, 188, 58, 111, 35, 6, 202, 7, 144, 22, 174, 248, 92, 19, 23,
+        103, 242, 56,
     ];
 
     #[test]

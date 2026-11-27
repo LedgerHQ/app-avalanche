@@ -6,5 +6,7 @@ input_file: app/src/parser/testvectors/create_subnet.json
 [
     "CreateSubnet": "transaction",
     "Owner address": "local1mg47uqd7stkvqrp57ds7m28txra45u2uzkta8n",
+    "Amount": "3.999 AVAX to ",
+    "Address": "local1mg47uqd7stkvqrp57ds7m28txra45u2uzkta8n",
     "Fee(AVAX)": "2000.001",
 ]

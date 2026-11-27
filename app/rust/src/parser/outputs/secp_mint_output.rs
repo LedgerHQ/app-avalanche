@@ -24,7 +24,12 @@ use zemu_sys::ViewError;
 use crate::{
     checked_add,
     handlers::handle_ui_message,
-    parser::{Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES},
+    parser::{
+        outputs::{
+            address_items, check_locktime, check_threshold, render_locktime, render_no_owner,
+        },
+        Address, DisplayableItem, FromBytes, ParserError, ADDRESS_LEN, MAX_ADDRESSES,
+    },
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -77,9 +82,11 @@ impl<'b> FromBytes<'b> for SECPMintOutput<'b> {
         let addresses =
             bytemuck::try_cast_slice(addresses).map_err(|_| ParserError::InvalidAddressLength)?;
 
-        if (threshold as usize > addresses.len()) || (addresses.is_empty() && threshold != 0) {
-            return Err(ParserError::InvalidThreshold.into());
-        }
+        // threshold 0 is accepted and shown, see check_threshold
+        check_threshold(threshold, addresses.len())?;
+
+        // the locktime is shown as a date
+        check_locktime(locktime)?;
 
         //good ptr and no uninit reads
         let out = out.as_mut_ptr();
@@ -95,18 +102,35 @@ impl<'b> FromBytes<'b> for SECPMintOutput<'b> {
 
 impl DisplayableItem for SECPMintOutput<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        // output-type, threshold and addresses
+        // output-type, threshold and addresses (or the "anyone can mint"
+        // screen when there is none)
         checked_add!(
             ViewError::Unknown,
             2u8,
-            self.addresses.len() as u8,
+            address_items(self.addresses.len()),
             (self.locktime > 0) as u8
         )
     }
 
-    #[inline(never)]
     fn render_item(
         &self,
+        item_n: u8,
+        title: &mut [u8],
+        message: &mut [u8],
+        page: u8,
+    ) -> Result<u8, ViewError> {
+        self.render_item_with_hrp("", item_n, title, message, page)
+    }
+}
+
+impl SECPMintOutput<'_> {
+    /// Same as the DisplayableItem rendering, but encodes addresses for `hrp`.
+    /// The empty HRP that render_item uses produces a string no wallet
+    /// accepts, so any screen that knows the network should come through here.
+    #[inline(never)]
+    pub fn render_item_with_hrp(
+        &self,
+        hrp: &str,
         item_n: u8,
         title: &mut [u8],
         message: &mut [u8],
@@ -116,7 +140,7 @@ impl DisplayableItem for SECPMintOutput<'_> {
         use itoa::Buffer;
 
         let mut itoa_buffer = Buffer::new();
-        let addr_item_n = self.num_items()? - self.addresses.len() as u8;
+        let addr_item_n = self.num_items()? - address_items(self.addresses.len());
 
         match item_n {
             0 => {
@@ -127,11 +151,7 @@ impl DisplayableItem for SECPMintOutput<'_> {
             }
 
             1 if self.locktime > 0 => {
-                let title_content = pic_str!(b"Locktime");
-                title[..title_content.len()].copy_from_slice(title_content);
-                let buffer = itoa_buffer.format(self.locktime);
-
-                handle_ui_message(buffer.as_bytes(), message, page)
+                render_locktime(pic_str!(b"Locktime"), self.locktime, title, message, page)
             }
 
             x @ 1.. if (x == 1 && self.locktime == 0) || (x == 2 && self.locktime > 0) => {
@@ -143,13 +163,22 @@ impl DisplayableItem for SECPMintOutput<'_> {
                 handle_ui_message(buffer.as_bytes(), message, page)
             }
 
+            // Threshold 0 with no address: anyone can mint the asset with no
+            // signature.
+            x @ 2.. if x == addr_item_n && self.addresses.is_empty() => render_no_owner(
+                pic_str!(b"Address"),
+                pic_str!(b"Anyone can mint"),
+                title,
+                message,
+                page,
+            ),
             x @ 2.. if x >= addr_item_n => {
                 let idx = x - addr_item_n;
                 if let Some(data) = self.addresses.get(idx as usize) {
                     let mut addr = MaybeUninit::uninit();
                     Address::from_bytes_into(data, &mut addr).map_err(|_| ViewError::Unknown)?;
                     let addr = unsafe { addr.assume_init() };
-                    addr.render_item(0, title, message, page)
+                    addr.render_with_hrp(hrp, title, message, page)
                 } else {
                     Err(ViewError::NoData)
                 }

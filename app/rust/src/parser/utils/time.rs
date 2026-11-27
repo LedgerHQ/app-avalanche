@@ -92,28 +92,29 @@ pub struct Date {
 
 /// Conversts a unix `timestamp`
 /// returns a date
-pub fn timestamp_to_date(timestamp: i64) -> Result<Date, TimeError> {
+///
+/// The arithmetic is done in u64 end to end: truncating the day count to
+/// u32 let a far-future timestamp wrap around into the year table and
+/// print as an ordinary recent date. Timestamps past the end of the table
+/// (the start of year 2369) are rejected rather than clamped.
+pub fn timestamp_to_date(timestamp: u64) -> Result<Date, TimeError> {
     let month_days = PIC::new(MONTH_DAYS).into_inner();
     let year_lookup = PIC::new(YEAR_LOOKUP).into_inner();
 
-    let mut t = timestamp;
-
-    let tm_sec = (t % 60) as u8;
-    t -= tm_sec as i64;
-    t /= 60;
+    let tm_sec = (timestamp % 60) as u8;
+    let t = timestamp / 60;
 
     let tm_min = (t % 60) as u8;
-    t -= tm_min as i64;
-    t /= 60;
+    let t = t / 60;
 
     let tm_hour = (t % 24) as u8;
-    t -= tm_hour as i64;
-    t /= 24;
+    // days since the epoch
+    let t = t / 24;
 
     // Look up tm_year
     let mut tm_year = 0;
 
-    while tm_year < year_lookup.len() && year_lookup[tm_year] <= t as _ {
+    while tm_year < year_lookup.len() && u64::from(year_lookup[tm_year]) <= t {
         tm_year += 1;
     }
 
@@ -122,7 +123,8 @@ pub fn timestamp_to_date(timestamp: i64) -> Result<Date, TimeError> {
     }
     tm_year -= 1;
 
-    let mut tm_day: u16 = (t as u32 - year_lookup[tm_year] + 1) as u16;
+    // t is below the next entry of the table, so this is at most 366
+    let mut tm_day = (t - u64::from(year_lookup[tm_year]) + 1) as u16;
     tm_year += 1970;
 
     // Get day/month
@@ -154,7 +156,7 @@ pub fn timestamp_to_date(timestamp: i64) -> Result<Date, TimeError> {
 /// Conversts a unix `timestamp`
 /// returns a formatted date string  on success
 pub fn timestamp_to_str_date(
-    timestamp: i64,
+    timestamp: u64,
 ) -> Result<ArrayVec<u8, FORMATTED_STR_DATE_LEN>, TimeError> {
     let date = timestamp_to_date(timestamp)?;
 
@@ -229,10 +231,42 @@ mod tests {
 
             let date_str = date.format(&format).unwrap();
 
-            let test_date = timestamp_to_str_date(t).unwrap();
+            let test_date = timestamp_to_str_date(t as u64).unwrap();
             let test_date = std::str::from_utf8(test_date.as_slice()).unwrap();
 
             assert_eq!(&date_str, test_date);
+        }
+    }
+
+    // Unix time of 2369-01-01 00:00:00 UTC, the first instant past the table.
+    const END_OF_TABLE: u64 = 145_732 * 86_400;
+
+    #[test]
+    fn last_second_of_table_formats() {
+        let t = END_OF_TABLE - 1;
+        let date = timestamp_to_str_date(t).unwrap();
+        assert_eq!(
+            std::str::from_utf8(date.as_slice()).unwrap(),
+            "2368-12-31 23:59:59 UTC"
+        );
+    }
+
+    #[test]
+    fn timestamps_past_table_are_rejected() {
+        // The day count used to be truncated to u32, so these wrapped around
+        // into the table and printed as ordinary dates: the first one is
+        // about 11.76 million years out and showed as 2025-01-01.
+        for t in [
+            0x0001_5180_6774_8580u64,
+            (1u64 << 32) * 86_400 + 20_089 * 86_400,
+            END_OF_TABLE,
+            1u64 << 40,
+            i64::MAX as u64,
+            // i64::MIN read as u64; the old i64 arithmetic overflowed here
+            1u64 << 63,
+            u64::MAX,
+        ] {
+            assert!(timestamp_to_date(t).is_err(), "{:#x} was accepted", t);
         }
     }
 }

@@ -31,18 +31,18 @@ static zxerr_t parser_allocate(parser_tx_t *parser_state);
 
 // This buffer will store parser_state.
 // Its size corresponds to ParsedObj (Rust struct)
-// Maximum required size: 256 bytes
+// Maximum required size: 256 bytes (PARSER_BUFFER_SIZE in rust/src/ffi.rs)
+// Aligned for the Rust Transaction, which holds u64 fields.
 #define PARSER_BUFFER_SIZE 256
-static uint8_t parser_buffer[PARSER_BUFFER_SIZE];
+static uint8_t parser_buffer[PARSER_BUFFER_SIZE] __attribute__((aligned(8)));
 
 // This function is used to allocate memory for the parser state
 zxerr_t parser_allocate(parser_tx_t *parser_state) {
-    if (parser_state->len % 4 != 0) {
-        parser_state->len += parser_state->len % 4;
-    }
     if (parser_state->len > PARSER_BUFFER_SIZE) {
         return zxerr_buffer_too_small;
     }
+    // round up to a multiple of 4, still within the buffer
+    parser_state->len = (parser_state->len + 3) & ~3u;
     if (parser_state->state != NULL) {
         return zxerr_unknown;
     }
@@ -111,6 +111,10 @@ parser_error_t parser_validate(const parser_context_t *ctx) {
     for (uint8_t idx = 0; idx < numItems; idx++) {
         uint8_t pageCount = 0;
         CHECK_ERROR(parser_getItem(ctx, idx, tmpKey, sizeof(tmpKey), tmpVal, sizeof(tmpVal), 0, &pageCount))
+        // The UI skips an item with no pages, so it would never be shown
+        if (pageCount == 0) {
+            return parser_display_page_out_of_range;
+        }
     }
     return parser_ok;
 }

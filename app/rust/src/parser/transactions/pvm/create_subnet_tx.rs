@@ -23,7 +23,7 @@ use crate::{
     handlers::handle_ui_message,
     parser::{
         nano_avax_to_fp_str, BaseTxFields, DisplayableItem, FromBytes, Header, ParserError,
-        PvmOutput, SECPOutputOwners, PVM_CREATE_SUBNET, U64_FORMATTED_SIZE
+        PvmOutput, SECPOutputOwners, PVM_CREATE_SUBNET, U64_FORMATTED_SIZE,
     },
 };
 
@@ -37,6 +37,10 @@ pub struct CreateSubnetTx<'b> {
 }
 
 impl<'b> CreateSubnetTx<'b> {
+
+    pub fn disable_output_if(&mut self, address: &[u8]) {
+        self.base_tx.disable_output_if(address);
+    }
     fn fee(&'b self) -> Result<u64, ParserError> {
         let sum_inputs = self.base_tx.sum_inputs_amount()?;
 
@@ -55,14 +59,13 @@ impl<'b> CreateSubnetTx<'b> {
         message: &mut [u8],
         page: u8,
     ) -> Result<u8, zemu_sys::ViewError> {
-        use bolos::{pic_str, PIC};
-
-        let label = pic_str!(b"Owner address");
-        title[..label.len()].copy_from_slice(label);
-
+        // addr_idx is an index into the owners' counted items, not into their
+        // address list: num_items includes a Locktime screen ahead of the
+        // addresses when locktime is non-zero. Treating it as an address index
+        // skipped that screen and ran the last index past the end of the list.
         let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
         self.owners
-            .render_address_with_hrp(hrp, addr_idx, message, page)
+            .render_item_with_hrp(hrp, addr_idx as u8, title, message, page)
     }
 }
 
@@ -84,7 +87,11 @@ impl<'b> FromBytes<'b> for CreateSubnetTx<'b> {
 
         // base_tx
         let base_tx = unsafe { &mut *addr_of_mut!((*out).base_tx).cast() };
-        let rem = BaseTxFields::<PvmOutput>::from_bytes_into(rem, base_tx)?;
+        let rem = BaseTxFields::<PvmOutput>::from_bytes_after(
+            unsafe { tx_header.assume_init_ref() },
+            rem,
+            base_tx,
+        )?;
 
         let owners = unsafe { &mut *addr_of_mut!((*out).owners).cast() };
         let rem = SECPOutputOwners::from_bytes_into(rem, owners)?;
@@ -95,7 +102,15 @@ impl<'b> FromBytes<'b> for CreateSubnetTx<'b> {
 
 impl DisplayableItem for CreateSubnetTx<'_> {
     fn num_items(&self) -> Result<u8, ViewError> {
-        checked_add!(ViewError::Unknown, 2u8, self.owners.num_items()?)
+        // description + owners + base outputs + fee.
+        // The base outputs were previously left out of the count entirely, so
+        // where the transaction's funds went was never on screen.
+        checked_add!(
+            ViewError::Unknown,
+            2u8,
+            self.owners.num_items()?,
+            self.base_tx.base_outputs_num_items()?
+        )
     }
 
     fn render_item(
@@ -108,8 +123,10 @@ impl DisplayableItem for CreateSubnetTx<'_> {
         use bolos::{pic_str, PIC};
 
         let owner_items = self.owners.num_items()?;
+        let output_items = self.base_tx.base_outputs_num_items()?;
         let start_owner = 1;
         let end_owner = start_owner + owner_items;
+        let end_outputs = end_owner + output_items;
 
         match item_n {
             0 => {
@@ -121,7 +138,12 @@ impl DisplayableItem for CreateSubnetTx<'_> {
             x if (start_owner..end_owner).contains(&x) => {
                 self.render_owners((x - 1) as usize, title, message, page)
             }
-            x if x == end_owner => {
+            x if (end_owner..end_outputs).contains(&x) => {
+                let hrp = self.tx_header.hrp().map_err(|_| ViewError::Unknown)?;
+                self.base_tx
+                    .render_base_output_with_hrp(hrp, x - end_owner, title, message, page)
+            }
+            x if x == end_outputs => {
                 let label = pic_str!(b"Fee(AVAX)");
                 title[..label.len()].copy_from_slice(label);
                 let mut buffer = [0; U64_FORMATTED_SIZE + 2];
@@ -141,17 +163,18 @@ mod tests {
 
     const DATA: &[u8] = &[
         0, 0, 0, 16, 0, 0, 0, 1, 237, 95, 56, 52, 30, 67, 110, 93, 70, 226, 187, 0, 180, 93, 98,
-        174, 151, 209, 176, 80, 198, 75, 198, 52, 174, 16, 98, 103, 57, 227, 92, 75, 0, 0, 0, 1, 2,
-        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-        2, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 39, 16, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 1, 0, 0, 0, 1,
-        157, 31, 52, 188, 58, 111, 35, 6, 202, 7, 144, 22, 174, 248, 92, 19, 23, 103, 242, 56, 0,
-        0, 0, 1, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-        7, 7, 7, 7, 7, 0, 0, 0, 2, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
-        8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 31, 64, 0, 0, 0, 10, 0, 0,
-        0, 4, 0, 0, 0, 5, 0, 0, 0, 58, 0, 0, 0, 1, 0, 0, 0, 79, 0, 0, 0, 65, 0, 0, 0, 87, 0, 0, 0,
-        94, 0, 0, 0, 125, 0, 0, 1, 122, 0, 0, 0, 4, 109, 101, 109, 111, 0, 0, 0, 11, 0, 0, 0, 0, 0,
-        0, 0, 12, 0, 0, 0, 1, 0, 0, 0, 1, 22, 54, 119, 75, 103, 131, 141, 236, 22, 225, 106, 182,
-        207, 172, 178, 27, 136, 195, 168, 97,
+        174, 151, 209, 176, 80, 198, 75, 198, 52, 174, 16, 98, 103, 57, 227, 92, 75, 0, 0, 0, 1,
+        33, 230, 115, 23, 203, 196, 190, 42, 235, 0, 103, 122, 214, 70, 39, 120, 168, 245, 34, 116,
+        185, 214, 5, 223, 37, 145, 178, 48, 39, 168, 125, 255, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 39,
+        16, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 1, 0, 0, 0, 1, 157, 31, 52, 188, 58, 111, 35, 6, 202,
+        7, 144, 22, 174, 248, 92, 19, 23, 103, 242, 56, 0, 0, 0, 1, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+        7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 0, 0, 0, 2, 33, 230, 115,
+        23, 203, 196, 190, 42, 235, 0, 103, 122, 214, 70, 39, 120, 168, 245, 34, 116, 185, 214, 5,
+        223, 37, 145, 178, 48, 39, 168, 125, 255, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 31, 64, 0, 0, 0,
+        10, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0, 58, 0, 0, 0, 1, 0, 0, 0, 79, 0, 0, 0, 65, 0, 0, 0, 87,
+        0, 0, 0, 94, 0, 0, 0, 125, 0, 0, 1, 122, 0, 0, 0, 4, 109, 101, 109, 111, 0, 0, 0, 11, 0, 0,
+        0, 0, 0, 0, 0, 12, 0, 0, 0, 1, 0, 0, 0, 1, 22, 54, 119, 75, 103, 131, 141, 236, 22, 225,
+        106, 182, 207, 172, 178, 27, 136, 195, 168, 97,
     ];
 
     #[test]
